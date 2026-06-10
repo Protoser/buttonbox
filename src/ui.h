@@ -1,0 +1,19 @@
+// Screen pages, navigation, and rendering.
+#pragma once
+#include <Arduino.h>
+
+enum Page : uint8_t {
+  PAGE_LAUNCHER, PAGE_BUTTONS, PAGE_MENU, PAGE_SETTINGS, PAGE_BTNTEST, PAGE_TIMER,
+  PAGE_LAPLIST, PAGE_CHORDS, PAGE_CHORD_CAPTURE, PAGE_CHORD_OUTPUT, PAGE_CHORD_EDIT,
+  PAGE_DASH, PAGE_PCSTATS, PAGE_SHELLY
+};
+
+void uiBegin();                       // display init + apply saved orientation
+Page uiPage();
+void uiNoteActivity(uint32_t now);    // wake from idle blank, mark dirty
+void uiApplyOrientation();            // re-apply saved rotation (after a remote flip change)
+void uiEnterFlash();                  // show "flash mode" + enter the bootloader
+void uiHandleMenuButton();            // menu/toggle button pressed
+void uiHandlePageInput();             // physical-button presses on a non-HOME page
+void uiHandleTimerLap(uint32_t now);  // Lap button: tap=record, hold=undo+open list
+void uiTickDisplay(uint32_t now);     // idle blank + redraw
