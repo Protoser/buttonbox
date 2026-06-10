@@ -11,13 +11,14 @@ static const uint8_t  CW_N           = 4;
 void loadSettings() {
   Preferences p;
   p.begin("bbox", true);
-  settings.flipped       = p.getBool("flip", true);
+  settings.flipped       = p.getBool("flip", false);
   settings.labelsGpio    = p.getBool("gpiolbl", false);
   settings.idleBlankSec  = p.getUShort("idle", 0);
   settings.chordWindowMs = p.getUShort("chordwin", 40);
   settings.bootSel = p.getUChar("boot", 1);
   { uint8_t def[5] = {0,1,2,3,4};
     if (p.getBytes("pcord", settings.pcStatOrder, 5) != 5) memcpy(settings.pcStatOrder, def, 5); }
+  settings.wifiMode = p.getUChar("wmode", 2);
   p.end();
 }
 
@@ -30,6 +31,7 @@ void saveSettings() {
   p.putUShort("chordwin", settings.chordWindowMs);
   p.putUChar("boot", settings.bootSel);
   p.putBytes("pcord", settings.pcStatOrder, 5);
+  p.putUChar("wmode", settings.wifiMode);
   p.end();
 }
 

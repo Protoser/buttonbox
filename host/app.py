@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QPushButton, QSystemTrayIcon, QTabWidget, QVBoxLayout, QWidget,
 )
 
+import secrets_store
 from link import DeviceLink
 
 # ---- constants mirrored from the firmware (config.h / settings) ----
@@ -22,7 +23,7 @@ OUT_MIN, OUT_MAX = 14, 31     # chord outputs (shown 15..32)
 MAX_CHORDS = 18
 IDLE_OPTS  = [(0, "Off"), (30, "30 s"), (120, "2 min")]
 CHORD_OPTS = [30, 40, 60, 80]
-BOOT_OPTS  = [(0, "Apps launcher"), (1, "Buttons"), (2, "Timer"), (3, "PC"), (4, "Menu")]
+BOOT_OPTS  = [(0, "Apps launcher"), (1, "Buttons"), (2, "Timer"), (3, "PC"), (4, "Shelly"), (5, "Menu")]
 PCSTAT_BITS = [("CPU", 0), ("RAM", 1), ("GPU", 2), ("CPU Temp", 3), ("GPU Temp", 4),
                ("VRAM", 5), ("CPU Power", 6), ("GPU Power", 7)]
 PCSTAT_MAX = 5      # box shows up to 5 at once
@@ -186,6 +187,10 @@ class DeviceTab(QWidget):
 
         conn = QGroupBox("Connectivity (WiFi + Shelly)")
         cl = QFormLayout(conn)
+        self.wifi_mode_combo = QComboBox()
+        for val, lbl in ((2, "Auto — via PC when companion is connected"), (1, "Always On"), (0, "Always Off")):
+            self.wifi_mode_combo.addItem(lbl, val)
+        cl.addRow("WiFi Mode", self.wifi_mode_combo)
         self.wifi_ssid = QLineEdit(); self.wifi_ssid.setPlaceholderText("e.g. MyHomeNetwork")
         cl.addRow("WiFi SSID", self.wifi_ssid)
         self.wifi_pass = QLineEdit(); self.wifi_pass.setEchoMode(QLineEdit.Password)
@@ -248,10 +253,14 @@ class DeviceTab(QWidget):
 
     def _apply_connectivity(self):
         for k, w in (("wifi_ssid", self.wifi_ssid), ("wifi_pass", self.wifi_pass),
-                     ("shelly_ip", self.shelly_ip), ("shelly_user", self.shelly_user),
-                     ("shelly_pass", self.shelly_pass)):
+                     ("shelly_ip", self.shelly_ip), ("shelly_user", self.shelly_user)):
             if w.text():
                 self.link.set_setting(k, w.text())
+        if self.shelly_pass.text():
+            self.link.set_setting("shelly_pass", self.shelly_pass.text())
+            self.link.set_shelly_pass(self.shelly_pass.text())
+            secrets_store.set_secret("shelly_pass", self.shelly_pass.text())  # encrypted (DPAPI)
+        self.link.set_setting("wifi_mode", self.wifi_mode_combo.currentData())
 
     def _remove_stat(self):
         row = self.stat_list.currentRow()
@@ -288,6 +297,10 @@ class DeviceTab(QWidget):
         if "wssid"  in cfg: self.wifi_ssid.setText(cfg["wssid"])
         if "ship"   in cfg: self.shelly_ip.setText(cfg["ship"])
         if "shuser" in cfg: self.shelly_user.setText(cfg["shuser"])
+        if "wmode"  in cfg:
+            idx = self.wifi_mode_combo.findData(cfg["wmode"])
+            if idx >= 0:
+                self.wifi_mode_combo.setCurrentIndex(idx)
         self._loading = False
 
 
@@ -458,6 +471,13 @@ def main():
     act_flash.triggered.connect(link.flash)
     act_quit.triggered.connect(quit_app)
     tray.activated.connect(on_activated)
+
+    # Restore the saved Shelly password (DPAPI-decrypted) so auto-polling works
+    # immediately on connect — device never echoes passwords back.
+    saved_pw = secrets_store.get_secret("shelly_pass")
+    if saved_pw:
+        link.set_shelly_pass(saved_pw)
+        win.device.shelly_pass.setText(saved_pw)   # masked field (echo = Password)
 
     tray.show()
     link.start()                    # starts minimized: window stays hidden

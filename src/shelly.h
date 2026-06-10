@@ -3,6 +3,10 @@
 #pragma once
 #include <Arduino.h>
 
+#define WIFI_MODE_OFF  0   // WiFi never started; Shelly data unavailable
+#define WIFI_MODE_ON   1   // WiFi always on; ESP32 polls Shelly directly
+#define WIFI_MODE_AUTO 2   // companion connected → companion polls via PC; else ESP32 uses WiFi
+
 struct ShellyState {
   bool     output  = false;
   float    apower  = 0.0f;   // W
@@ -25,8 +29,11 @@ extern ShellyConfig shellyConfig;
 
 void shellyLoadConfig();
 void shellySaveConfig();
-void shellyRestartWifi();       // reconnect with current credentials
-void shellyBegin();             // load config, create mutex, start task
-void shellyQueueToggle();       // request a Switch.Toggle on the next task tick
-bool shellyFresh(uint32_t now); // true if last poll was < 6 s ago
-bool shellyWifiOk();            // true if WiFi is associated
+void shellyRestartWifi();              // notify task to re-evaluate WiFi (mode or creds changed)
+void shellyBegin();                    // load config, create mutex, start task
+void shellyQueueToggle();              // queue a direct WiFi Switch.Toggle
+void shellyToggle();                   // toggle: via serial if companion mode, else direct WiFi
+bool shellyCompanionMode();            // true when mode=AUTO and companion is actively connected
+void shellyApplyFromCompanion(char *); // parse "out:1 apower:.. .." line pushed by companion
+bool shellyFresh(uint32_t now);        // true if last poll (any source) was < 6 s ago
+bool shellyWifiOk();                   // true if WiFi is associated

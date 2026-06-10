@@ -21,8 +21,8 @@ static int8_t lastAppSel = 0;
 
 static const char *MENU_ITEMS[]     = {"Button Test", "Chords", "Settings", "Flash Mode", "Back"};
 static const uint8_t MENU_COUNT     = 5;
-static const char *SETTINGS_ITEMS[] = {"Rotate", "Labels", "Idle", "Chord", "Boot", "Back"};
-static const uint8_t SETTINGS_COUNT = 6;
+static const char *SETTINGS_ITEMS[] = {"Rotate", "Labels", "Idle", "Chord", "Boot", "WiFi", "Back"};
+static const uint8_t SETTINGS_COUNT = 7;
 static const char *PCSTAT_ITEMS[]   = {"CPU", "RAM", "GPU", "CPU Temp", "GPU Temp",
                                        "VRAM", "CPU Pwr", "GPU Pwr"};
 static const uint8_t PCSTAT_NUM      = 8;   // number of selectable stats
@@ -44,6 +44,11 @@ static const uint16_t LAP_HOLD_MS = 500;
 static uint32_t lapHoldStart     = 0;
 static bool     lapHoldHandled   = false;
 static bool     lapRecordedPress = false;
+
+// Menu button: tap = launcher/resume, hold = quick-switch to the previous app.
+static const uint16_t MENU_HOLD_MS = 400;
+static uint32_t menuHoldStart   = 0;
+static bool     menuHoldHandled = false;
 
 static bool     displayDirty = true;
 static uint32_t lastDraw     = 0;
@@ -90,7 +95,7 @@ static const uint8_t APP_COUNT = sizeof(APPS) / sizeof(APPS[0]);
 // ----------------------------------------------------------------------------
 //  Actions
 // ----------------------------------------------------------------------------
-static void applyOrientation() { u8g2.setDisplayRotation(settings.flipped ? U8G2_R2 : U8G2_R0); }
+static void applyOrientation() { u8g2.setDisplayRotation(settings.flipped ? U8G2_R0 : U8G2_R2); }
 
 static void enterBootloader() {
   u8g2.clearBuffer();
@@ -154,7 +159,8 @@ static void handleNav(uint8_t a) {
         case 2: settingsCycleIdle();                                            break;
         case 3: settingsCycleChordWin();                                        break;
         case 4: settings.bootSel = (settings.bootSel + 1) % (APP_COUNT + 1); saveSettings(); break;
-        case 5: gotoPage(PAGE_MENU); return;
+        case 5: settings.wifiMode = (settings.wifiMode + 1) % 3; saveSettings(); shellyRestartWifi(); break;
+        case 6: gotoPage(PAGE_MENU); return;
       }
       break;
 
@@ -217,7 +223,7 @@ static void handleNav(uint8_t a) {
       break;
 
     case PAGE_SHELLY:
-      if      (a == NAV_SELECT) { shellyQueueToggle(); }
+      if      (a == NAV_SELECT) { shellyToggle(); }
       else if (a == NAV_BACK)   { gotoPage(PAGE_LAUNCHER); return; }
       break;
 
@@ -252,6 +258,10 @@ static void handleNav(uint8_t a) {
 // ----------------------------------------------------------------------------
 //  Rendering
 // ----------------------------------------------------------------------------
+// Content area helpers — legend left when flipped=false (U8G2_R2/mounted), right when flipped=true (U8G2_R0).
+static uint8_t cL() { return settings.flipped ? 0 : 18; }   // left edge of content
+static uint8_t cR() { return settings.flipped ? 110 : 128; } // right edge of content (exclusive)
+
 static void drawListHeader(const char *title) {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_6x12_tr);
@@ -259,20 +269,24 @@ static void drawListHeader(const char *title) {
   u8g2.drawHLine(0, 13, 128);
 }
 
-// Left-side glyph legend for the 4 nav buttons (top->bottom = physical order).
+// Legend for the 4 nav buttons. When screen is flipped the legend moves to the
+// right side and hints are reversed (physical top button = last action).
 static void drawNavLegend(const NavHint h[4]) {
-  u8g2.drawVLine(16, 15, 48);
-  const uint8_t cx = 8;
+  bool right = settings.flipped;
+  int8_t cx = right ? 120 : 8;
+  if (right) u8g2.drawVLine(111, 15, 48);
+  else       u8g2.drawVLine(16,  15, 48);
   for (uint8_t r = 0; r < 4; r++) {
+    const NavHint &hint = !settings.flipped ? h[3 - r] : h[r];
     uint8_t cy = 22 + r * 12;
-    switch (h[r].kind) {
+    switch (hint.kind) {
       case H_UP:    u8g2.drawTriangle(cx, cy - 4, cx - 4, cy + 3, cx + 4, cy + 3); break;
       case H_DOWN:  u8g2.drawTriangle(cx - 4, cy - 3, cx + 4, cy - 3, cx, cy + 4); break;
       case H_LEFT:  u8g2.drawTriangle(cx - 4, cy, cx + 3, cy - 4, cx + 3, cy + 4); break;
       case H_RIGHT: u8g2.drawTriangle(cx + 4, cy, cx - 3, cy - 4, cx - 3, cy + 4); break;
       case H_PLAY:  u8g2.drawTriangle(cx - 3, cy - 4, cx - 3, cy + 4, cx + 4, cy); break;
       case H_PAUSE: u8g2.drawBox(cx - 3, cy - 4, 2, 8); u8g2.drawBox(cx + 1, cy - 4, 2, 8); break;
-      case H_TEXT:  u8g2.setFont(u8g2_font_6x12_tr); u8g2.drawStr(cx - u8g2.getStrWidth(h[r].label) / 2, cy + 4, h[r].label); break;
+      case H_TEXT:  u8g2.setFont(u8g2_font_6x12_tr); u8g2.drawStr(cx - u8g2.getStrWidth(hint.label) / 2, cy + 4, hint.label); break;
       default: break;
     }
   }
@@ -314,12 +328,12 @@ static void drawList(const char *title, const char *const *items, uint8_t count,
   for (uint8_t row = 0; row < visible && (start + row) < count; row++) {
     uint8_t idx = start + row;
     uint8_t y = 16 + row * 12;
-    if (idx == sel) { u8g2.drawBox(18, y, 110, 12); u8g2.setDrawColor(0); }
-    u8g2.drawStr(21, y + 10, items[idx]);
+    if (idx == sel) { u8g2.drawBox(cL(), y, 110, 12); u8g2.setDrawColor(0); }
+    u8g2.drawStr(cL()+3, y + 10, items[idx]);
     if (settingsValues) {
       char val[12] = {0};
       switch (idx) {
-        case 0: snprintf(val, sizeof(val), settings.flipped ? "Flipped" : "Normal"); break;
+        case 0: snprintf(val, sizeof(val), settings.flipped ? "Normal" : "Rotated"); break;
         case 1: snprintf(val, sizeof(val), settings.labelsGpio ? "GPIO" : "HID#");   break;
         case 2:
           if (settings.idleBlankSec == 0)      snprintf(val, sizeof(val), "Off");
@@ -332,8 +346,13 @@ static void drawList(const char *title, const char *const *items, uint8_t count,
           snprintf(val, sizeof(val), "%s", bs == 0 ? "Apps" : APPS[bs - 1].name);
           break;
         }
+        case 5: {
+          const char *wm[] = {"Off", "On", "Auto"};
+          snprintf(val, sizeof(val), "%s", wm[settings.wifiMode % 3]);
+          break;
+        }
       }
-      if (val[0]) u8g2.drawStr(124 - u8g2.getStrWidth(val), y + 10, val);
+      if (val[0]) u8g2.drawStr(cR()-4 - u8g2.getStrWidth(val), y + 10, val);
     }
     u8g2.setDrawColor(1);
   }
@@ -367,14 +386,14 @@ static void drawTimer() {
   drawListHeader("STOPWATCH");
   char buf[16]; fmtTime(e, buf, sizeof(buf));
   u8g2.setFont(u8g2_font_10x20_tr);
-  u8g2.drawStr(18 + (110 - u8g2.getStrWidth(buf)) / 2, 40, buf);   // centered right of the legend
+  u8g2.drawStr(cL() + (110 - u8g2.getStrWidth(buf)) / 2, 40, buf);
   u8g2.setFont(u8g2_font_6x12_tr);
   char l[28];
   if (swLapCount() > 0) {
     char ts[16]; fmtTime(swLastSplit(), ts, sizeof(ts));
     snprintf(l, sizeof(l), "Lap %u: %s", (unsigned)swLapCount(), ts);
   } else snprintf(l, sizeof(l), "%s", swIsRunning() ? "running..." : "ready");
-  u8g2.drawStr(20, 58, l);
+  u8g2.drawStr(cL()+2, 58, l);
   NavHint th[4] = {{swIsRunning() ? H_PAUSE : H_PLAY, ""}, {H_TEXT, "L"}, {H_TEXT, "R"}, {H_LEFT, ""}};
   drawNavLegend(th);
   u8g2.sendBuffer();
@@ -394,11 +413,11 @@ static void drawLapList() {
       uint16_t lapNo = swLapCount() - idx;
       uint32_t split = swSplitByNumber(lapNo);
       uint8_t  y = 16 + row * 12;
-      if (idx == sel) { u8g2.drawBox(18, y, 110, 12); u8g2.setDrawColor(0); }
+      if (idx == sel) { u8g2.drawBox(cL(), y, 110, 12); u8g2.setDrawColor(0); }
       char lbl[8]; snprintf(lbl, sizeof(lbl), "L%u", (unsigned)lapNo);
-      u8g2.drawStr(21, y + 10, lbl);                                  // lap number, left
+      u8g2.drawStr(cL()+3, y + 10, lbl);
       char ts[16]; fmtTime(split, ts, sizeof(ts));
-      u8g2.drawStr(124 - u8g2.getStrWidth(ts), y + 10, ts);           // time, right-aligned
+      u8g2.drawStr(cR()-4 - u8g2.getStrWidth(ts), y + 10, ts);
       u8g2.setDrawColor(1);
     }
   }
@@ -415,12 +434,12 @@ static void drawChords() {
   for (uint8_t row = 0; row < visible && (start + row) < count; row++) {
     uint8_t idx = start + row;
     uint8_t y = 16 + row * 12;
-    if (idx == sel) { u8g2.drawBox(18, y, 110, 12); u8g2.setDrawColor(0); }
+    if (idx == sel) { u8g2.drawBox(cL(), y, 110, 12); u8g2.setDrawColor(0); }
     char buf[24];
     if (idx < chordCount) { char mem[18]; fmtMembers(chords[idx].members, mem, sizeof(mem)); snprintf(buf, sizeof(buf), "%s>%u", mem, chords[idx].output + 1); }
     else if (idx == chordCount) snprintf(buf, sizeof(buf), "[ Add chord ]");
     else snprintf(buf, sizeof(buf), "Back");
-    u8g2.drawStr(21, y + 10, buf);
+    u8g2.drawStr(cL()+3, y + 10, buf);
     u8g2.setDrawColor(1);
   }
   drawNavLegend(LIST_HINTS);
@@ -441,9 +460,9 @@ static void drawCapture() {
 static void drawChordOutput() {
   drawListHeader(editingOutput ? "EDIT OUTPUT" : "OUTPUT");
   char mem[24]; fmtMembers(editingOutput ? chords[editChord].members : pendingMembers, mem, sizeof(mem));
-  u8g2.setFont(u8g2_font_6x12_tr); u8g2.drawStr(20, 30, mem);
+  u8g2.setFont(u8g2_font_6x12_tr); u8g2.drawStr(cL()+2, 30, mem);
   char line[20]; snprintf(line, sizeof(line), "-> button %u", outputSel + 1);
-  u8g2.drawStr(20, 48, line);
+  u8g2.drawStr(cL()+2, 48, line);
   drawNavLegend(LIST_HINTS);
   u8g2.sendBuffer();
 }
@@ -454,8 +473,8 @@ static void drawChordEdit() {
   const char *items[3] = {outItem, "Delete", "Back"};
   for (uint8_t row = 0; row < 3; row++) {
     uint8_t y = 16 + row * 12;
-    if (row == sel) { u8g2.drawBox(18, y, 110, 12); u8g2.setDrawColor(0); }
-    u8g2.drawStr(21, y + 10, items[row]);
+    if (row == sel) { u8g2.drawBox(cL(), y, 110, 12); u8g2.setDrawColor(0); }
+    u8g2.drawStr(cL()+3, y + 10, items[row]);
     u8g2.setDrawColor(1);
   }
   drawNavLegend(LIST_HINTS);
@@ -497,7 +516,7 @@ static void iconShelly(int cx, int cy) {             // power plug
 static void drawLauncher() {
   u8g2.clearBuffer();
   const uint8_t cols = 3, cellW = 36, cellH = 32;
-  const int gx = 18;                                  // grid starts right of the legend
+  const int gx = cL();                                // grid starts past the legend
   u8g2.setFont(u8g2_font_5x7_tr);
   for (uint8_t i = 0; i < APP_COUNT; i++) {
     uint8_t c = i % cols, r = i / cols;
@@ -518,7 +537,7 @@ static void drawDash() {
   NavHint legend[4] = {{H_NONE, ""}, {H_NONE, ""}, {H_TEXT, "C"}, {H_LEFT, ""}};  // ►=config ◄=back
   if (!pcStatsFresh(now)) {
     u8g2.setFont(u8g2_font_6x12_tr);
-    u8g2.drawStr(24, 40, "Waiting for PC...");
+    u8g2.drawStr(cL()+2, 40, "Waiting for PC...");
     drawNavLegend(legend);
     u8g2.sendBuffer();
     return;
@@ -531,8 +550,8 @@ static void drawDash() {
     {"CTmp", pcStats.cpuTemp,   'C', 30, 100},
     {"GTmp", pcStats.gpuTemp,   'C', 30, 100},
     {"VRAM", pcStats.vramUsed,  '%',  0, 100},
-    {"CPwr", pcStats.cpuPower,  'W',  0, 250},
-    {"GPwr", pcStats.gpuPower,  'W',  0, 450},
+    {"CPwr", pcStats.cpuPower,  'W',  0, 200},
+    {"GPwr", pcStats.gpuPower,  'W',  0, 200},
   };
   u8g2.setFont(u8g2_font_5x7_tr);
   uint8_t shown = 0;
@@ -541,14 +560,14 @@ static void drawDash() {
     if (i >= PCSTAT_NUM) continue;
     const Metric &m = ALL[i];
     uint8_t y = 16 + shown++ * 9;
-    u8g2.drawStr(20, y + 7, m.lbl);
-    u8g2.drawFrame(44, y, 58, 8);
+    u8g2.drawStr(cL()+2, y + 7, m.lbl);
+    u8g2.drawFrame(cL()+26, y, 58, 8);
     uint8_t fill = (uint8_t)((long)(constrain(m.val, m.barMin, m.barMax) - m.barMin) * 56 / (m.barMax - m.barMin));
-    if (fill) u8g2.drawBox(45, y + 1, fill, 6);
+    if (fill) u8g2.drawBox(cL()+27, y + 1, fill, 6);
     char num[10]; snprintf(num, sizeof(num), "%d%c", m.val, m.unit);
-    u8g2.drawStr(126 - u8g2.getStrWidth(num), y + 7, num);
+    u8g2.drawStr(cR()-2 - u8g2.getStrWidth(num), y + 7, num);
   }
-  if (shown == 0) u8g2.drawStr(24, 40, "No stats enabled");
+  if (shown == 0) u8g2.drawStr(cL()+2, 40, "No stats enabled");
   drawNavLegend(legend);
   u8g2.sendBuffer();
 }
@@ -560,15 +579,15 @@ static void drawPcStatsCfg() {
   for (uint8_t row = 0; row < visible && (start + row) < PCSTAT_TOTAL; row++) {
     uint8_t idx = start + row;
     uint8_t y = 16 + row * 12;
-    if (idx == sel) { u8g2.drawBox(18, y, 110, 12); u8g2.setDrawColor(0); }
+    if (idx == sel) { u8g2.drawBox(cL(), y, 110, 12); u8g2.setDrawColor(0); }
     if (idx < PCSTAT_MAX_ON) {
       uint8_t stat = settings.pcStatOrder[idx];
       char lbl[20];
       snprintf(lbl, sizeof(lbl), "%u. %s", idx + 1,
                stat < PCSTAT_NUM ? PCSTAT_ITEMS[stat] : "---");
-      u8g2.drawStr(21, y + 10, lbl);
+      u8g2.drawStr(cL()+3, y + 10, lbl);
     } else {
-      u8g2.drawStr(21, y + 10, "Back");
+      u8g2.drawStr(cL()+3, y + 10, "Back");
     }
     u8g2.setDrawColor(1);
   }
@@ -579,23 +598,33 @@ static void drawPcStatsCfg() {
 static void drawShelly() {
   uint32_t now = millis();
   drawListHeader("SHELLY");
-  NavHint h[4] = {{H_NONE,""},{H_NONE,""},{H_TEXT,"TG"},{H_LEFT,""}};
+  NavHint hTg[4]   = {{H_NONE,""},{H_NONE,""},{H_TEXT,"TG"},{H_LEFT,""}};
+  NavHint hNoTg[4] = {{H_NONE,""},{H_NONE,""},{H_NONE,""},{H_LEFT,""}};
 
-  if (!shellyWifiOk()) {
+  if (settings.wifiMode == WIFI_MODE_OFF) {
     u8g2.setFont(u8g2_font_6x12_tr);
-    u8g2.drawStr(20, 38, shellyConfig.wifiSsid[0] ? "Connecting..." : "No WiFi set");
-    NavHint h2[4] = {{H_NONE,""},{H_NONE,""},{H_NONE,""},{H_LEFT,""}};
-    drawNavLegend(h2);
+    u8g2.drawStr(cL()+2, 38, "WiFi Off");
+    drawNavLegend(hNoTg);
+    u8g2.sendBuffer();
+    return;
+  }
+
+  bool companion = shellyCompanionMode();
+  if (!companion && !shellyWifiOk()) {
+    u8g2.setFont(u8g2_font_6x12_tr);
+    u8g2.drawStr(cL()+2, 38, shellyConfig.wifiSsid[0] ? "Connecting..." : "No WiFi set");
+    drawNavLegend(hNoTg);
     u8g2.sendBuffer();
     return;
   }
   if (!shellyFresh(now)) {
     u8g2.setFont(u8g2_font_6x12_tr);
-    u8g2.drawStr(20, 38, "Waiting...");
-    drawNavLegend(h);
+    u8g2.drawStr(cL()+2, 38, companion ? "Via PC..." : "Waiting...");
+    drawNavLegend(hTg);
     u8g2.sendBuffer();
     return;
   }
+  NavHint *h = hTg;
 
   // Snapshot (float reads on 32-bit arch are atomic enough for display)
   bool  on  = shellyState.output;
@@ -604,17 +633,16 @@ static void drawShelly() {
   float cur = shellyState.current;
   float tmp = shellyState.tempC;
 
-  // Large ON / OFF on the right
+  // Large ON / OFF anchored to the content right edge
   const char *label = on ? "ON" : "OFF";
   u8g2.setFont(u8g2_font_10x20_tr);
-  u8g2.drawStr(128 - u8g2.getStrWidth(label), 40, label);
+  u8g2.drawStr(cR() - u8g2.getStrWidth(label), 40, label);
 
-  // Stats on the left
   u8g2.setFont(u8g2_font_5x7_tr);
   char line[24];
-  snprintf(line, sizeof(line), "%.1fW", pwr);    u8g2.drawStr(20, 23, line);
-  snprintf(line, sizeof(line), "%.0fV %.2fA", vlt, cur); u8g2.drawStr(20, 33, line);
-  snprintf(line, sizeof(line), "%.0fC dev", tmp);        u8g2.drawStr(20, 43, line);
+  snprintf(line, sizeof(line), "%.1fW", pwr);             u8g2.drawStr(cL()+2, 23, line);
+  snprintf(line, sizeof(line), "%.0fV %.2fA", vlt, cur);  u8g2.drawStr(cL()+2, 33, line);
+  snprintf(line, sizeof(line), "%.0fC dev", tmp);         u8g2.drawStr(cL()+2, 43, line);
 
   drawNavLegend(h);
   u8g2.sendBuffer();
@@ -654,12 +682,29 @@ void uiNoteActivity(uint32_t now) { lastActivity = now; blanked = false; display
 void uiApplyOrientation() { applyOrientation(); }   // public hooks for the host link
 void uiEnterFlash()       { enterBootloader(); }
 
-// Menu button = global home/switch key: in any app -> launcher; on the launcher
-// -> resume the last app. Capture is the one exception (it saves the chord).
-void uiHandleMenuButton() {
-  if (page == PAGE_CHORD_CAPTURE) { confirmCapture(); return; }
-  if (page == PAGE_LAUNCHER)      { gotoPage(lastApp); sel = lastAppSel; return; }
-  gotoPage(PAGE_LAUNCHER);
+// Menu button = global home/switch key. Tap (short press, fires on release):
+// in any app -> launcher; on the launcher -> resume the last app; capture saves.
+// Hold (>= MENU_HOLD_MS): quick-switch straight to the previous app, bypassing the
+// launcher and swapping last<->current so repeated holds toggle between two apps.
+void uiHandleMenuButton(uint32_t now) {
+  if (pressedEdge(toggleBtn)) { menuHoldStart = now; menuHoldHandled = false; }
+
+  if (toggleBtn.pressed && !menuHoldHandled && page != PAGE_CHORD_CAPTURE &&
+      (now - menuHoldStart) >= MENU_HOLD_MS) {
+    menuHoldHandled = true;
+    Page   cur    = (page == PAGE_LAUNCHER) ? lastApp : page;   // app we're leaving
+    int8_t curSel = (page == PAGE_LAUNCHER) ? lastAppSel : sel;
+    gotoPage(lastApp); sel = lastAppSel;       // jump to the previous app
+    lastApp = cur; lastAppSel = curSel;        // ...and make it the next target
+    return;
+  }
+
+  if (releasedEdge(toggleBtn)) {
+    if (menuHoldHandled) return;               // hold already switched; ignore the tap
+    if (page == PAGE_CHORD_CAPTURE) { confirmCapture(); return; }
+    if (page == PAGE_LAUNCHER)      { gotoPage(lastApp); sel = lastAppSel; return; }
+    gotoPage(PAGE_LAUNCHER);
+  }
 }
 
 void uiHandlePageInput() {
@@ -674,12 +719,18 @@ void uiHandlePageInput() {
     uiSuppressedMask |= (1u << i);
     if (page == PAGE_CHORD_CAPTURE)   { captureMask ^= (1u << i); displayDirty = true; }
     else if (page == PAGE_BTNTEST)    { testLastHid = i; testLastGpio = hidGpio(i); displayDirty = true; }
-    else if (isNav)                   { handleNav(i - NUM_ALWAYS); }
+    else if (isNav) {
+      uint8_t ni = i - NUM_ALWAYS;
+      ni = (NUM_NAV - 1) - ni;
+      handleNav(ni);
+    }
   }
 }
 
 void uiHandleTimerLap(uint32_t now) {
-  Button &lap = navBtns[1];
+  // NAV_DOWN physical index, reversed when screen is flipped
+  uint8_t lapIdx = NUM_NAV - 1 - NAV_DOWN;
+  Button &lap = navBtns[lapIdx];
   if (pressedEdge(lap)) {
     lapHoldStart = now; lapHoldHandled = false;
     lapRecordedPress = swRecordLap(now);
@@ -695,7 +746,8 @@ void uiHandleTimerLap(uint32_t now) {
 void uiTickDisplay(uint32_t now) {
   bool keepAwake = (page == PAGE_TIMER && swIsRunning()) ||
                    (page == PAGE_DASH && pcStatsFresh(now)) ||
-                   (page == PAGE_SHELLY && shellyWifiOk());
+                   (page == PAGE_SHELLY && settings.wifiMode != WIFI_MODE_OFF &&
+                    (shellyWifiOk() || shellyCompanionMode()));
   if (!blanked && !keepAwake && settings.idleBlankSec > 0 &&
       (now - lastActivity) > (uint32_t)settings.idleBlankSec * 1000) {
     u8g2.clearBuffer(); u8g2.sendBuffer(); blanked = true;

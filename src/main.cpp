@@ -44,7 +44,7 @@ void loop() {
   buttonsUpdate(now);
   hostlinkUpdate(now);            // drain serial: PC telemetry + config commands
   if (buttonsAnyEdge())         uiNoteActivity(now);
-  if (pressedEdge(toggleBtn))   uiHandleMenuButton();
+  uiHandleMenuButton(now);        // tap = launcher/resume, hold = quick-switch app
 
   // On non-Buttons pages the UI first claims the buttons it needs (the nav
   // buttons, or all buttons on the capture/test pages) by suppressing them.

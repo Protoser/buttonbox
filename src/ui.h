@@ -13,7 +13,7 @@ Page uiPage();
 void uiNoteActivity(uint32_t now);    // wake from idle blank, mark dirty
 void uiApplyOrientation();            // re-apply saved rotation (after a remote flip change)
 void uiEnterFlash();                  // show "flash mode" + enter the bootloader
-void uiHandleMenuButton();            // menu/toggle button pressed
+void uiHandleMenuButton(uint32_t now); // menu/toggle button: tap=launcher, hold=quick-switch app
 void uiHandlePageInput();             // physical-button presses on a non-HOME page
 void uiHandleTimerLap(uint32_t now);  // Lap button: tap=record, hold=undo+open list
 void uiTickDisplay(uint32_t now);     // idle blank + redraw

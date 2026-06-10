@@ -1,4 +1,6 @@
 #include "shelly.h"
+#include "settings.h"
+#include "pcstats.h"
 #include <Preferences.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -140,6 +142,14 @@ static float jsonNestedFloat(const String &s, const char *outer, const char *inn
   return jsonFloat(s.substring(brace, end + 1), inner, def);
 }
 
+// ── WiFi mode helpers ─────────────────────────────────────────────────────────
+
+static bool shouldUseWifi() {
+  if (settings.wifiMode == WIFI_MODE_OFF) return false;
+  if (settings.wifiMode == WIFI_MODE_ON)  return true;
+  return !pcStatsFresh(millis());   // AUTO: use WiFi only when companion is absent
+}
+
 // ── Background task (runs on core 0; main loop on core 1 never blocks) ───────
 
 static void shellyTaskFn(void *) {
@@ -147,6 +157,18 @@ static void shellyTaskFn(void *) {
   for (;;) {
     uint32_t notifyVal = 0;
     xTaskNotifyWait(0, 0xFFFFFFFF, &notifyVal, pdMS_TO_TICKS(POLL_MS));
+
+    // bit 1 = mode/credentials changed; reset retry so reconnect happens immediately
+    if (notifyVal & 2) wifiRetry = 0;
+
+    if (!shouldUseWifi()) {
+      // Disconnect WiFi if it was running under a previous mode
+      if (WiFi.status() == WL_CONNECTED) {
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_MODE_NULL);
+      }
+      continue;
+    }
 
     // WiFi management — reconnect if needed
     if (WiFi.status() != WL_CONNECTED) {
@@ -207,11 +229,8 @@ void shellySaveConfig() {
 }
 
 void shellyRestartWifi() {
-  if (shellyConfig.wifiSsid[0]) {
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(shellyConfig.wifiSsid, shellyConfig.wifiPass);
-  }
+  // Notify task (bit 1) to re-evaluate mode/creds; it manages WiFi start/stop itself
+  if (shellyTaskHandle) xTaskNotify(shellyTaskHandle, 2, eSetBits);
 }
 
 void shellyBegin() {
@@ -219,16 +238,51 @@ void shellyBegin() {
   memset(&shellyConfig, 0, sizeof(shellyConfig));
   shellyLoadConfig();
   stateMutex = xSemaphoreCreateMutex();
-  // Pin HTTP task to core 0; Arduino loop() runs on core 1
+  // Task manages WiFi connect/disconnect based on mode; let it handle the initial state too
   xTaskCreatePinnedToCore(shellyTaskFn, "shelly", 8192, nullptr, 1, &shellyTaskHandle, 0);
-  if (shellyConfig.wifiSsid[0]) {
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(shellyConfig.wifiSsid, shellyConfig.wifiPass);
-  }
 }
 
 void shellyQueueToggle() {
   if (shellyTaskHandle) xTaskNotify(shellyTaskHandle, 1, eSetBits);
+}
+
+void shellyToggle() {
+  if (shellyCompanionMode()) {
+    Serial.println("shelly_toggle");   // companion will do the HTTP call
+  } else {
+    shellyQueueToggle();
+  }
+}
+
+bool shellyCompanionMode() {
+  return settings.wifiMode == WIFI_MODE_AUTO && pcStatsFresh(millis());
+}
+
+void shellyApplyFromCompanion(char *line) {
+  // Parse tokens like "out:1 apower:45.2 voltage:230.1 current:0.196 temp:40.5"
+  ShellyState s;
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  s = shellyState;
+  xSemaphoreGive(stateMutex);
+
+  char *tok = strtok(line, " ");
+  while (tok) {
+    char *colon = strchr(tok, ':');
+    if (colon) {
+      *colon = '\0';
+      if      (!strcmp(tok, "out"))     s.output  = (atoi(colon + 1) != 0);
+      else if (!strcmp(tok, "apower"))  s.apower  = atof(colon + 1);
+      else if (!strcmp(tok, "voltage")) s.voltage = atof(colon + 1);
+      else if (!strcmp(tok, "current")) s.current = atof(colon + 1);
+      else if (!strcmp(tok, "temp"))    s.tempC   = atof(colon + 1);
+    }
+    tok = strtok(nullptr, " ");
+  }
+  s.lastRx = millis();
+
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  shellyState = s;
+  xSemaphoreGive(stateMutex);
 }
 
 bool shellyFresh(uint32_t now) {

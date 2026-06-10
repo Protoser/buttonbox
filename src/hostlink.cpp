@@ -15,9 +15,9 @@ static void emitConfig() {
                 settings.chordWindowMs, settings.bootSel);
   for (uint8_t i = 0; i < 5; i++)
     Serial.printf(i == 0 ? "%u" : ",%u", settings.pcStatOrder[i]);
-  Serial.printf(" wssid:%s ship:%s shuser:%s nchords:%u\n",
+  Serial.printf(" wssid:%s ship:%s shuser:%s wmode:%u nchords:%u\n",
                 shellyConfig.wifiSsid, shellyConfig.shellyIp,
-                shellyConfig.shellyUser, chordCount);
+                shellyConfig.shellyUser, settings.wifiMode, chordCount);
   for (uint8_t i = 0; i < chordCount; i++)
     Serial.printf("chd %u:%lu:%u\n", i, (unsigned long)chords[i].members, chords[i].output);
 }
@@ -41,6 +41,10 @@ static void handleSet(char *args, uint32_t now) {
       settings.pcStatOrder[i] = (idx >= 0 && idx < 8) ? (uint8_t)idx : 0xFF;
       if (*p2 == ',') p2++;
     }
+  }
+  else if (!strcmp(key, "wifi_mode")) {
+    settings.wifiMode = (uint8_t)constrain(v, 0, 2);
+    saveSettings(); shellyRestartWifi(); uiNoteActivity(now); emitConfig(); return;
   }
   // String-valued connectivity settings — save separately and return early
   else if (!strcmp(key, "wifi_ssid"))   {
@@ -96,11 +100,12 @@ static void handleChord(char *args) {
 }
 
 static void dispatch(char *line, uint32_t now) {
-  if      (!strcmp(line, "get"))        emitConfig();
-  else if (!strncmp(line, "set ", 4))   handleSet(line + 4, now);
-  else if (!strncmp(line, "chord ", 6)) handleChord(line + 6);
-  else if (!strcmp(line, "flash"))      uiEnterFlash();
-  else                                  pcStatsApply(line, now);   // PC telemetry
+  if      (!strcmp(line, "get"))          emitConfig();
+  else if (!strncmp(line, "set ", 4))     handleSet(line + 4, now);
+  else if (!strncmp(line, "chord ", 6))   handleChord(line + 6);
+  else if (!strcmp(line, "flash"))        uiEnterFlash();
+  else if (!strncmp(line, "shelly ", 7))  shellyApplyFromCompanion(line + 7);
+  else                                    pcStatsApply(line, now);   // PC telemetry
 }
 
 void hostlinkUpdate(uint32_t now) {
