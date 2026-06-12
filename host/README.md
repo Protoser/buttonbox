@@ -8,7 +8,7 @@ the tray and **auto-reconnects** whenever the box is unplugged/replugged.
 host/
   app.py          the companion app (tray + Monitor / Device / Chords tabs)
   link.py         background serial thread: discovery, telemetry, commands, auto-reconnect
-  sensors.py      sensor reading (psutil + LibreHardwareMonitor / nvidia-smi)
+  sensors.py      sensor reading (psutil + LibreHardwareMonitor)
   pcstats.py      headless CLI fallback (no GUI), shares sensors.py
   companion.spec  PyInstaller build -> standalone .exe
   build.bat       one-shot build script
@@ -45,11 +45,8 @@ source:
    `System.Numerics.Vectors.dll`, `System.Threading.Tasks.Extensions.dll`,
    `HidSharp.dll`). The app resolves them from this folder automatically.
 2. **Run the app as Administrator** — CPU temperature comes from MSR/SuperIO,
-   which needs the kernel sensor driver. Without admin you'll still get CPU/RAM,
-   GPU load/temp (via NVAPI/nvidia-smi), just not CPU temp.
-
-NVIDIA-only machines can skip LHM for GPU (nvidia-smi is used as a fallback), but
-CPU temp still needs LHM + admin.
+   which needs the kernel sensor driver. Without admin you'll still get CPU/RAM
+   and GPU load/temp, just not CPU temp.
 
 ## Build a standalone .exe
 

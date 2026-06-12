@@ -1,13 +1,10 @@
 """PC sensor reading.
 
-CPU load + RAM come from psutil (no extra setup). GPU load/temp and CPU temp come
-from LibreHardwareMonitor (pythonnet + its DLLs in this folder, run as admin) or,
-failing that, nvidia-smi. read_stats() returns a dict with any of:
-cpu, ram, gpu, ct, gt.
+CPU load + RAM come from psutil (no extra setup). GPU load/temp, CPU temp, VRAM,
+and power come from LibreHardwareMonitor (pythonnet + its DLLs in this folder, run
+as admin). read_stats() returns a dict with any of: cpu, ram, gpu, ct, gt, vr, cp, gp.
 """
 import os
-import shutil
-import subprocess
 import sys
 
 try:
@@ -108,33 +105,6 @@ class _LHM:
         return out
 
 
-def _nvidia():
-    """Dict with any of gpu, gt, vr, gp (NVIDIA only)."""
-    if not shutil.which("nvidia-smi"):
-        return {}
-    try:
-        out = subprocess.check_output(
-            ["nvidia-smi",
-             "--query-gpu=utilization.gpu,temperature.gpu,memory.used,memory.total,power.draw",
-             "--format=csv,noheader,nounits"],
-            text=True, timeout=2).strip().splitlines()[0]
-        u, t, mu, mt, p = (x.strip() for x in out.split(","))
-    except Exception:                    # noqa: BLE001
-        return {}
-    d = {}
-    for key, raw in (("gpu", u), ("gt", t), ("gp", p)):
-        try:
-            d[key] = int(float(raw))
-        except ValueError:
-            pass
-    try:
-        if float(mt) > 0:
-            d["vr"] = int(float(mu) / float(mt) * 100)
-    except ValueError:
-        pass
-    return d
-
-
 _lhm = None
 
 
@@ -158,12 +128,6 @@ def read_stats():
             vals.update(_lhm.read())
         except Exception:                # noqa: BLE001
             pass
-    need = ("gpu", "gt", "vr", "gp")     # nvidia-smi fills any GPU fields LHM missed
-    if any(k not in vals for k in need):
-        nv = _nvidia()
-        for k in need:
-            if k not in vals and k in nv:
-                vals[k] = nv[k]
     return vals
 
 

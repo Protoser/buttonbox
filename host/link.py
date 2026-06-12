@@ -44,6 +44,13 @@ class DeviceLink(QThread):
         self._shelly_result: dict | None = None
         self._shelly_lock   = threading.Lock()
 
+        # Latest PC sensor reading, produced by _sensor_loop. An LHM .Update() can
+        # block for a while; doing it off the serial thread keeps the telemetry
+        # heartbeat steady so the box never falls back to "Waiting for PC..." just
+        # because one read ran long.
+        self._latest_stats: dict = {}
+        self._stats_lock = threading.Lock()
+
     # ---- called from the GUI thread (just enqueue; the thread does the I/O) ----
     def send(self, line):       self._cmds.put(line)
     def request_config(self):   self.send("get")
@@ -89,12 +96,28 @@ class DeviceLink(QThread):
                 with self._shelly_lock:
                     self._shelly_result = st
 
+    def _sensor_loop(self):
+        """Background thread: read PC sensors at `interval` and cache the latest
+        values. A slow LHM .Update() stays off the serial thread, which always
+        writes the most recent cached values on a steady cadence."""
+        while self._running:
+            try:
+                vals = sensors.read_stats()
+            except Exception:               # noqa: BLE001
+                vals = None
+            if vals:
+                with self._stats_lock:
+                    self._latest_stats = vals
+            time.sleep(self.interval)
+
     def run(self):
         ok, err = sensors.init()
         self.lhmStatus.emit(ok, "" if ok else str(err))
 
         shelly_thread = threading.Thread(target=self._shelly_loop, daemon=True, name="shelly-poll")
         shelly_thread.start()
+        sensor_thread = threading.Thread(target=self._sensor_loop, daemon=True, name="sensor-read")
+        sensor_thread.start()
 
         ser = None
         buf = b""
@@ -128,7 +151,9 @@ class DeviceLink(QThread):
                     cmd = self._cmds.get_nowait()
                     ser.write((cmd + "\n").encode())
 
-                vals = sensors.read_stats()
+                # Write the most recent cached sensor values (read on _sensor_loop)
+                with self._stats_lock:
+                    vals = dict(self._latest_stats)
                 if vals:
                     self.statsRead.emit(vals)
                     ser.write((sensors.encode(vals) + "\n").encode())
