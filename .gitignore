@@ -27,3 +27,6 @@ host/*.xml
 
 # LibreHardwareMonitor exe
 LibreHardwareMonitor.exe*
+
+# Source photos
+pictures/

@@ -1,12 +1,19 @@
 # Buttonbox
 
-Custom USB button box built on an **ESP32-S3 N16R8** with 14 physical buttons and a CR-10 ST7920 display (128x64). The device enumerates as a native USB HID gamepad and includes a companion PC app for live configuration, monitoring, and button chord management.
+Custom USB button box built on an **ESP32-S3 N16R8** with a salvaged Ender 3 / CR-10 ST7920 display (128x64) and cheap mini push buttons. The device enumerates as a native USB HID gamepad and includes a companion PC app for live configuration, monitoring, media control, and button chord management.
+
+## Build one / downloads
+
+See the **[build guide](docs/BUILD.md)** for the bill of materials, the 3D-printed
+case ([`3d_models/`](3d_models)), wiring/pinout, and assembly photos. You don't
+have to compile anything — prebuilt `firmware.bin` and `ButtonboxCompanion.exe`
+are on the Releases page.
 
 ## Hardware
 
 - **MCU:** ESP32-S3 N16R8 DevKitC-1 (16 MB flash + 8 MB OPI PSRAM)
-- **Display:** CR-10 module with ST7920 controller (128x64, software SPI)
-- **Buttons:** 14 total — 10 always-on HID buttons, 4 multiplexed nav/menu buttons via a mode toggle
+- **Display:** salvaged **Ender 3 / CR-10** "full graphic smart controller" — ST7920 128x64, software SPI
+- **Buttons:** 15 cheap [mini push buttons](https://www.roboter-bausatz.de/p/schwarzer-mini-push-button) — 14 report as HID (10 always-on + 4 nav), plus 1 menu/mode toggle
 - **USB:** Native TinyUSB CDC + gamepad HID
 
 ## Project structure
@@ -31,6 +38,8 @@ host/                 Windows companion app (Python / PySide6)
   app.py              System-tray GUI with Monitor, Device, and Chords tabs
   link.py             Background serial thread — discovery, telemetry, auto-reconnect
   sensors.py          Hardware sensor reads via psutil + LibreHardwareMonitor
+  media.py            Now-playing title + media controls (Windows media session)
+  secrets_store.py    Encrypted local store for the Shelly password (Windows DPAPI)
   pcstats.py          Headless CLI fallback (no GUI), streams stats only
   companion.spec      PyInstaller build spec
   build.bat           One-shot build script -> dist/ButtonboxCompanion.exe
@@ -56,8 +65,11 @@ The build requires `espressif32` platform and the U8g2 library (pulled automatic
 ```powershell
 cd host
 pip install PySide6 pyserial psutil
+pip install winrt-Windows.Media.Control winrt-Windows.Foundation   # optional: Music page
 pythonw app.py       # tray app (no console window)
 ```
+
+Prefer not to install Python? Grab the prebuilt **`ButtonboxCompanion.exe`** from the Releases page.
 
 ### Prerequisites for full sensor support
 
@@ -76,5 +88,6 @@ build.bat            # outputs dist/ButtonboxCompanion.exe
 - **On-screen menu** — navigate settings with the 4 multiplexed buttons and LCD display
 - **Button chords** — combine 2+ physical buttons into a single output keypress (configured via PC app)
 - **PC telemetry overlay** — live CPU/RAM/GPU load, temperatures, power, and VRAM displayed on the box screen
+- **Music app** — shows the current track (artist / title, Cyrillic-capable) from the Windows media session and runs play/pause, next, and previous from the box (companion app required)
 - **Device configuration** — rotate display, set idle blank timeout, boot screen selection, chord editing, and more — all persisted in NVS flash
 - **Auto-reconnect** — companion app reconnects automatically if the USB cable is unplugged/replugged
