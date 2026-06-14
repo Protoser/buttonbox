@@ -9,6 +9,7 @@ host/
   app.py          the companion app (tray + Monitor / Device / Chords tabs)
   link.py         background serial thread: discovery, telemetry, commands, auto-reconnect
   sensors.py      sensor reading (psutil + LibreHardwareMonitor)
+  media.py        now-playing title + transport control (Windows media session)
   pcstats.py      headless CLI fallback (no GUI), shares sensors.py
   companion.spec  PyInstaller build -> standalone .exe
   build.bat       one-shot build script
@@ -18,8 +19,15 @@ host/
 
 ```powershell
 pip install PySide6 pyserial psutil
+pip install winrt-Windows.Media.Control winrt-Windows.Foundation   # Music page
 python app.py            # tray app (use pythonw app.py for no console flash)
 ```
+
+The two `winrt-*` packages power the **Music** page (now-playing title +
+transport control) and ship prebuilt wheels (incl. Python 3.13). They're
+optional — without them everything else still runs and Music just shows "Nothing
+playing". (The older all-in-one `winsdk` package also works but has no 3.13
+wheel, so it tries to compile from source and fails — use the `winrt-*` packages.)
 
 It appears in the system tray (blue "BB" icon). **Left-click** the tray icon to
 open the window, **right-click** for the menu (Show / Start at login / Flash
@@ -32,6 +40,11 @@ device / Quit). Closing the window hides it back to the tray.
   firmware uploads).
 - **Chords** tab — see/add/delete button chords (pick 2+ member buttons + an
   output button); changes apply on the box immediately.
+
+The box also has a **Music** page (in its app launcher). The companion streams
+the current media-session title to it and relays the box's prev / play-pause /
+next button presses back to whatever is playing (Spotify, browser/YouTube, …) —
+the same targets the keyboard media keys hit. Needs the `winrt-*` packages (see above).
 
 ## Temperatures (LibreHardwareMonitor)
 

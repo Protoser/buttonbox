@@ -13,6 +13,7 @@ import serial
 import serial.tools.list_ports as list_ports
 from PySide6.QtCore import QThread, Signal
 
+import media
 import sensors
 import shelly_poll
 
@@ -50,6 +51,13 @@ class DeviceLink(QThread):
         # because one read ran long.
         self._latest_stats: dict = {}
         self._stats_lock = threading.Lock()
+
+        # Now-playing media, produced by _music_loop (WinRT calls are slow and
+        # async, so they stay off the serial thread too). Control commands from
+        # the box arrive on _music_cmds and run on that same loop.
+        self._music: dict = {"state": 0, "title": ""}
+        self._music_lock = threading.Lock()
+        self._music_cmds: queue.Queue = queue.Queue()
 
     # ---- called from the GUI thread (just enqueue; the thread does the I/O) ----
     def send(self, line):       self._cmds.put(line)
@@ -110,6 +118,22 @@ class DeviceLink(QThread):
                     self._latest_stats = vals
             time.sleep(self.interval)
 
+    def _music_loop(self):
+        """Background thread: run any queued transport commands, then refresh the
+        now-playing snapshot. WinRT calls live here so the serial loop only ever
+        reads the cached dict."""
+        while self._running:
+            try:
+                while True:
+                    media.control(self._music_cmds.get_nowait())
+            except queue.Empty:
+                pass
+            vals = media.read_now_playing()
+            if vals is not None:
+                with self._music_lock:
+                    self._music = vals
+            time.sleep(1.0)
+
     def run(self):
         ok, err = sensors.init()
         self.lhmStatus.emit(ok, "" if ok else str(err))
@@ -118,6 +142,8 @@ class DeviceLink(QThread):
         shelly_thread.start()
         sensor_thread = threading.Thread(target=self._sensor_loop, daemon=True, name="sensor-read")
         sensor_thread.start()
+        music_thread = threading.Thread(target=self._music_loop, daemon=True, name="music-read")
+        music_thread.start()
 
         ser = None
         buf = b""
@@ -158,6 +184,11 @@ class DeviceLink(QThread):
                     self.statsRead.emit(vals)
                     ser.write((sensors.encode(vals) + "\n").encode())
 
+                # Now-playing line for the Music page (state + sanitized title)
+                with self._music_lock:
+                    m = dict(self._music)
+                ser.write(f"music {m['state']} {m['title']}\n".encode())
+
                 buf += ser.read(4096)
                 while b"\n" in buf:
                     raw, buf = buf.split(b"\n", 1)
@@ -183,6 +214,8 @@ class DeviceLink(QThread):
                                 self.chordsReceived.emit(list(chords))
                     elif line == "shelly_toggle":
                         self._shelly_toggle_event.set()
+                    elif line.startswith("mctl "):
+                        self._music_cmds.put(line[5:].strip())
 
                 # Forward any pending Shelly result from the background poller
                 with self._shelly_lock:

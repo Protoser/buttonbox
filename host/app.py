@@ -23,7 +23,8 @@ OUT_MIN, OUT_MAX = 14, 31     # chord outputs (shown 15..32)
 MAX_CHORDS = 18
 IDLE_OPTS  = [(0, "Off"), (30, "30 s"), (120, "2 min")]
 CHORD_OPTS = [30, 40, 60, 80]
-BOOT_OPTS  = [(0, "Apps launcher"), (1, "Buttons"), (2, "Timer"), (3, "PC"), (4, "Shelly"), (5, "Menu")]
+BOOT_OPTS  = [(0, "Apps launcher"), (1, "Buttons"), (2, "Timer"), (3, "PC"), (4, "Shelly"),
+              (5, "Music"), (6, "Menu")]
 PCSTAT_BITS = [("CPU", 0), ("RAM", 1), ("GPU", 2), ("CPU Temp", 3), ("GPU Temp", 4),
                ("VRAM", 5), ("CPU Power", 6), ("GPU Power", 7)]
 PCSTAT_MAX = 5      # box shows up to 5 at once

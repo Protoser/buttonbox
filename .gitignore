@@ -18,10 +18,12 @@ build/
 host/build/
 host/dist/
 
-# Third-party binaries (DLLs, PDbs)
+# Third-party binaries (DLLs, PDBs)
 *.dll
 *.pdb
-*.xml
+
+# LibreHardwareMonitor XML docs
+host/*.xml
 
 # LibreHardwareMonitor exe
 LibreHardwareMonitor.exe*

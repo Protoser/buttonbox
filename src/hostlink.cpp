@@ -2,6 +2,7 @@
 #include "pcstats.h"
 #include "settings.h"
 #include "shelly.h"
+#include "music.h"
 #include "chords.h"
 #include "config.h"
 #include "ui.h"
@@ -105,6 +106,7 @@ static void dispatch(char *line, uint32_t now) {
   else if (!strncmp(line, "chord ", 6))   handleChord(line + 6);
   else if (!strcmp(line, "flash"))        uiEnterFlash();
   else if (!strncmp(line, "shelly ", 7))  shellyApplyFromCompanion(line + 7);
+  else if (!strncmp(line, "music ", 6))   musicApply(line + 6, now);
   else                                    pcStatsApply(line, now);   // PC telemetry
 }
 

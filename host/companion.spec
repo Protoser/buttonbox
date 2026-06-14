@@ -9,12 +9,27 @@ import os
 here = os.path.abspath(os.getcwd())
 dll_datas = [(f, ".") for f in glob.glob(os.path.join(here, "*.dll"))]
 
+# WinRT (Music page) ships compiled .pyd submodules — pull in whichever backend
+# is installed at build time (the modern winrt-* packages or the legacy winsdk);
+# skip cleanly if neither is (Music degrades to "Nothing playing").
+w_datas, w_bins, w_hidden = [], [], []
+try:
+    from PyInstaller.utils.hooks import collect_all
+    for _pkg in ("winrt", "winsdk"):
+        try:
+            _d, _b, _h = collect_all(_pkg)
+            w_datas += _d; w_bins += _b; w_hidden += _h
+        except Exception:
+            pass
+except Exception:
+    pass
+
 a = Analysis(
     ["app.py"],
     pathex=[here],
-    binaries=[],
-    datas=dll_datas,
-    hiddenimports=["psutil", "serial.tools.list_ports"],
+    binaries=w_bins,
+    datas=dll_datas + w_datas,
+    hiddenimports=["psutil", "serial.tools.list_ports"] + w_hidden,
     hookspath=[],
     runtime_hooks=[],
     excludes=[],

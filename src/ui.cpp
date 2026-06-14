@@ -7,6 +7,7 @@
 #include "stopwatch.h"
 #include "pcstats.h"
 #include "shelly.h"
+#include "music.h"
 #include "esp32-hal-tinyusb.h"   // usb_persist_restart()
 
 // ----------------------------------------------------------------------------
@@ -81,6 +82,7 @@ static void iconTimer(int cx, int cy);
 static void iconMenu(int cx, int cy);
 static void iconPc(int cx, int cy);
 static void iconShelly(int cx, int cy);
+static void iconMusic(int cx, int cy);
 
 struct App { const char *name; void (*drawIcon)(int cx, int cy); Page page; };
 static const App APPS[] = {
@@ -88,6 +90,7 @@ static const App APPS[] = {
   {"Timer",   iconTimer,   PAGE_TIMER},
   {"PC",      iconPc,      PAGE_DASH},
   {"Shelly",  iconShelly,  PAGE_SHELLY},
+  {"Music",   iconMusic,   PAGE_MUSIC},
   {"Menu",    iconMenu,    PAGE_MENU},
 };
 static const uint8_t APP_COUNT = sizeof(APPS) / sizeof(APPS[0]);
@@ -224,6 +227,13 @@ static void handleNav(uint8_t a) {
 
     case PAGE_SHELLY:
       if      (a == NAV_SELECT) { shellyToggle(); }
+      else if (a == NAV_BACK)   { gotoPage(PAGE_LAUNCHER); return; }
+      break;
+
+    case PAGE_MUSIC:
+      if      (a == NAV_UP)     musicSendCmd("prev");
+      else if (a == NAV_DOWN)   musicSendCmd("next");
+      else if (a == NAV_SELECT) musicSendCmd("playpause");
       else if (a == NAV_BACK)   { gotoPage(PAGE_LAUNCHER); return; }
       break;
 
@@ -509,6 +519,12 @@ static void iconShelly(int cx, int cy) {             // power plug
   u8g2.drawVLine(cx + 2, cy - 6, 7);                 // right prong
   u8g2.drawHLine(cx - 3, cy + 7, 6);                 // cord stub
 }
+static void iconMusic(int cx, int cy) {              // eighth note
+  u8g2.drawDisc(cx - 3, cy + 5, 2);                  // note head
+  u8g2.drawVLine(cx - 1, cy - 6, 12);                // stem
+  u8g2.drawLine(cx - 1, cy - 6, cx + 4, cy - 4);     // flag
+  u8g2.drawLine(cx - 1, cy - 2, cx + 4, cy);
+}
 
 // App launcher: 3-column icon grid (right of the nav legend); selected cell
 // gets a frame. The left legend shows what the 4 nav buttons do here:
@@ -648,6 +664,101 @@ static void drawShelly() {
   u8g2.sendBuffer();
 }
 
+// Now-playing: title wrapped to two lines (scrolled only if a line is too wide) + play/paused state.
+// Nav legend: << prev, >> next, play/pause toggle, ◄ back.
+// One title line: centered if it fits, else stepped one character per second.
+// The ST7920 smears continuous motion, so instead of scrolling pixel-by-pixel we
+// hold the line still and jump a whole glyph each STEP_MS.
+static const uint32_t STEP_MS = 1000;
+static void drawMusicLine(const char *s, int y, int left, int avail, uint32_t now) {
+  if (!s[0]) return;
+  int w = u8g2.getUTF8Width(s);
+  if (w <= avail) {
+    u8g2.drawUTF8(left + (avail - w) / 2, y, s);
+    return;
+  }
+  int cw = u8g2.getMaxCharWidth();
+  if (cw < 1) cw = 6;
+  const int period = w + cw * 2;                 // 2-glyph gap before it repeats
+  int off = (int)((now / STEP_MS) % (period / cw)) * cw;
+  u8g2.setClipWindow(left, y - 11, left + avail, y + 2);
+  u8g2.drawUTF8(left - off, y, s);
+  u8g2.drawUTF8(left - off + period, y, s);      // second copy = seamless wrap
+  u8g2.setMaxClipWindow();
+}
+
+// Split the title into up to two lines. Break at the first " - " (artist / song)
+// with the dash dropped entirely; otherwise wrap at the last space that keeps
+// line one within `avail`. A line still too wide gets scrolled by drawMusicLine.
+static void splitTitle(int avail, char *l1, char *l2, size_t cap) {
+  l1[0] = l2[0] = 0;
+  const char *src = music.title;
+  const char *dash = strstr(src, " - ");
+  if (dash) {
+    size_t n = (size_t)(dash - src);
+    if (n > cap - 1) n = cap - 1;
+    memcpy(l1, src, n); l1[n] = 0;
+    strncpy(l2, dash + 3, cap - 1); l2[cap - 1] = 0;   // skip " - "
+    return;
+  }
+  strncpy(l1, src, cap - 1); l1[cap - 1] = 0;
+  if (u8g2.getUTF8Width(l1) <= avail) return;           // fits on one line
+  int best = -1;
+  char tmp[64];
+  for (int i = 0; src[i] && i < (int)sizeof(tmp); i++) {
+    if (src[i] != ' ') continue;
+    memcpy(tmp, src, i); tmp[i] = 0;
+    if (u8g2.getUTF8Width(tmp) <= avail) best = i; else break;
+  }
+  if (best > 0) {
+    memcpy(l1, src, best); l1[best] = 0;
+    strncpy(l2, src + best + 1, cap - 1); l2[cap - 1] = 0;
+  }
+}
+
+static void drawMusic() {
+  uint32_t now = millis();
+  drawListHeader("MUSIC");
+  NavHint mh[4]   = {{H_TEXT, "<<"}, {H_TEXT, ">>"},
+                     {music.playState == 1 ? H_PAUSE : H_PLAY, ""}, {H_LEFT, ""}};
+  NavHint hBack[4] = {{H_NONE, ""}, {H_NONE, ""}, {H_NONE, ""}, {H_LEFT, ""}};
+
+  if (!musicFresh(now)) {
+    u8g2.setFont(u8g2_font_6x12_tr);
+    u8g2.drawStr(cL() + 2, 40, "Waiting for PC...");
+    drawNavLegend(hBack);
+    u8g2.sendBuffer();
+    return;
+  }
+  if (music.playState == 0 || music.title[0] == 0) {
+    u8g2.setFont(u8g2_font_6x12_tr);
+    u8g2.drawStr(cL() + 2, 40, "Nothing playing");
+    drawNavLegend(mh);
+    u8g2.sendBuffer();
+    return;
+  }
+
+  // Title across up to two lines (a " - " wraps artist/song; dash removed).
+  // drawUTF8 + a Cyrillic-capable font so non-Latin track titles render too.
+  u8g2.setFont(u8g2_font_6x12_t_cyrillic);
+  int left = cL() + 2, avail = (cR() - 2) - left;
+  char l1[64], l2[64];
+  splitTitle(avail, l1, l2, sizeof(l1));
+  if (l2[0]) {
+    drawMusicLine(l1, 25, left, avail, now);
+    const int dashW = 24;                              // small centered divider
+    u8g2.drawHLine(left + (avail - dashW) / 2, 33, dashW);
+    drawMusicLine(l2, 46, left, avail, now);
+  } else {
+    drawMusicLine(l1, 36, left, avail, now);
+  }
+
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(left, 58, music.playState == 1 ? "Playing" : "Paused");
+  drawNavLegend(mh);
+  u8g2.sendBuffer();
+}
+
 static void render() {
   switch (page) {
     case PAGE_LAUNCHER:      drawLauncher();                                             break;
@@ -664,6 +775,7 @@ static void render() {
     case PAGE_DASH:          drawDash();                                                 break;
     case PAGE_PCSTATS:       drawPcStatsCfg();                                           break;
     case PAGE_SHELLY:        drawShelly();                                               break;
+    case PAGE_MUSIC:         drawMusic();                                                break;
   }
 }
 
@@ -746,6 +858,7 @@ void uiHandleTimerLap(uint32_t now) {
 void uiTickDisplay(uint32_t now) {
   bool keepAwake = (page == PAGE_TIMER && swIsRunning()) ||
                    (page == PAGE_DASH && pcStatsFresh(now)) ||
+                   (page == PAGE_MUSIC && musicFresh(now)) ||
                    (page == PAGE_SHELLY && settings.wifiMode != WIFI_MODE_OFF &&
                     (shellyWifiOk() || shellyCompanionMode()));
   if (!blanked && !keepAwake && settings.idleBlankSec > 0 &&
