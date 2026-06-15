@@ -20,8 +20,8 @@ static int8_t sel  = 0;
 static Page   lastApp    = PAGE_BUTTONS;
 static int8_t lastAppSel = 0;
 
-static const char *MENU_ITEMS[]     = {"Button Test", "Chords", "Settings", "Flash Mode", "Back"};
-static const uint8_t MENU_COUNT     = 5;
+static const char *MENU_ITEMS[]     = {"Button Test", "Chords", "Settings", "App Order", "Flash Mode", "Back"};
+static const uint8_t MENU_COUNT     = 6;
 static const char *SETTINGS_ITEMS[] = {"Rotate", "Labels", "Idle", "Chord", "Boot", "WiFi", "Back"};
 static const uint8_t SETTINGS_COUNT = 7;
 static const char *PCSTAT_ITEMS[]   = {"CPU", "RAM", "GPU", "CPU Temp", "GPU Temp",
@@ -95,6 +95,32 @@ static const App APPS[] = {
 };
 static const uint8_t APP_COUNT = sizeof(APPS) / sizeof(APPS[0]);
 
+// Launcher display order. settings.appOrder stores app indices; build a clean,
+// de-duplicated permutation of 0..APP_COUNT-1, appending any apps the stored
+// order omits (so a firmware-added app still shows up). Returns the count.
+static uint8_t buildAppOrder(uint8_t out[APP_COUNT]) {
+  bool used[APP_COUNT] = {};
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < APP_ORDER_MAX && n < APP_COUNT; i++) {
+    uint8_t a = settings.appOrder[i];
+    if (a < APP_COUNT && !used[a]) { out[n++] = a; used[a] = true; }
+  }
+  for (uint8_t a = 0; a < APP_COUNT && n < APP_COUNT; a++)
+    if (!used[a]) out[n++] = a;
+  return n;
+}
+
+// Write a clean order back into settings.appOrder so the reorder page can swap
+// adjacent slots directly; unused capacity is marked empty (0xFF).
+static void normalizeAppOrder() {
+  uint8_t ord[APP_COUNT];
+  uint8_t n = buildAppOrder(ord);
+  for (uint8_t i = 0; i < n; i++)             settings.appOrder[i] = ord[i];
+  for (uint8_t i = n; i < APP_ORDER_MAX; i++) settings.appOrder[i] = 0xFF;
+}
+
+static bool appGrab = false;   // PAGE_APPORDER: true = Up/Down move the selected app
+
 // ----------------------------------------------------------------------------
 //  Actions
 // ----------------------------------------------------------------------------
@@ -135,7 +161,7 @@ static void handleNav(uint8_t a) {
     case PAGE_LAUNCHER:
       if      (a == NAV_UP)     { if (sel > 0) sel--; }
       else if (a == NAV_DOWN)   { if (sel < APP_COUNT - 1) sel++; }
-      else if (a == NAV_SELECT) { gotoPage(APPS[sel].page); return; }
+      else if (a == NAV_SELECT) { uint8_t ord[APP_COUNT]; buildAppOrder(ord); gotoPage(APPS[ord[sel]].page); return; }
       else if (a == NAV_BACK)   { gotoPage(lastApp); sel = lastAppSel; return; }
       break;
 
@@ -147,8 +173,9 @@ static void handleNav(uint8_t a) {
         case 0: gotoPage(PAGE_BTNTEST);  return;
         case 1: gotoPage(PAGE_CHORDS);   return;
         case 2: gotoPage(PAGE_SETTINGS); return;
-        case 3: enterBootloader();       return;
-        case 4: gotoPage(PAGE_LAUNCHER); return;
+        case 3: normalizeAppOrder(); appGrab = false; gotoPage(PAGE_APPORDER); return;
+        case 4: enterBootloader();       return;
+        case 5: gotoPage(PAGE_LAUNCHER); return;
       }
       break;
 
@@ -259,6 +286,24 @@ static void handleNav(uint8_t a) {
       }
       break;
     }
+
+    case PAGE_APPORDER:
+      // Up/Down move the cursor; Select grabs the app so Up/Down then move it.
+      // Back drops + saves. settings.appOrder is normalized on entry, so the
+      // first APP_COUNT slots are a clean permutation we can swap in place.
+      if      (a == NAV_BACK)   { appGrab = false; gotoPage(PAGE_MENU); return; }
+      else if (a == NAV_SELECT) { appGrab = !appGrab; }
+      else if (a == NAV_UP) {
+        if (appGrab && sel > 0) {
+          uint8_t t = settings.appOrder[sel]; settings.appOrder[sel] = settings.appOrder[sel - 1]; settings.appOrder[sel - 1] = t; sel--; saveSettings();
+        } else if (sel > 0) sel--;
+      }
+      else if (a == NAV_DOWN) {
+        if (appGrab && sel < APP_COUNT - 1) {
+          uint8_t t = settings.appOrder[sel]; settings.appOrder[sel] = settings.appOrder[sel + 1]; settings.appOrder[sel + 1] = t; sel++; saveSettings();
+        } else if (sel < APP_COUNT - 1) sel++;
+      }
+      break;
 
     default: break;
   }
@@ -534,13 +579,15 @@ static void drawLauncher() {
   const uint8_t cols = 3, cellW = 36, cellH = 32;
   const int gx = cL();                                // grid starts past the legend
   u8g2.setFont(u8g2_font_5x7_tr);
+  uint8_t ord[APP_COUNT]; buildAppOrder(ord);
   for (uint8_t i = 0; i < APP_COUNT; i++) {
+    const App &app = APPS[ord[i]];
     uint8_t c = i % cols, r = i / cols;
     int x0 = gx + c * cellW, y0 = r * cellH;
     int cx = x0 + cellW / 2, cy = y0 + 12;
     if (i == sel) u8g2.drawFrame(x0, y0, cellW, cellH);
-    APPS[i].drawIcon(cx, cy);
-    u8g2.drawStr(cx - u8g2.getStrWidth(APPS[i].name) / 2, y0 + 28, APPS[i].name);
+    app.drawIcon(cx, cy);
+    u8g2.drawStr(cx - u8g2.getStrWidth(app.name) / 2, y0 + 28, app.name);
   }
   drawNavLegend(LIST_HINTS);
   u8g2.sendBuffer();
@@ -608,6 +655,31 @@ static void drawPcStatsCfg() {
     u8g2.setDrawColor(1);
   }
   drawNavLegend(LIST_HINTS);
+  u8g2.sendBuffer();
+}
+
+// Launcher reorder: a numbered list of apps. Select "grabs" the highlighted app
+// (drawn as an outline instead of a fill); Up/Down then move it. Back saves.
+static void drawAppOrder() {
+  drawListHeader("APP ORDER");
+  const uint8_t visible = 4;
+  uint8_t start = (sel >= visible) ? (sel - visible + 1) : 0;
+  for (uint8_t row = 0; row < visible && (start + row) < APP_COUNT; row++) {
+    uint8_t idx = start + row;
+    uint8_t y = 16 + row * 12;
+    uint8_t a = settings.appOrder[idx];
+    if (idx == sel) {
+      if (appGrab) u8g2.drawFrame(cL(), y, 110, 12);            // grabbed: outline, text stays normal
+      else { u8g2.drawBox(cL(), y, 110, 12); u8g2.setDrawColor(0); }
+    }
+    char lbl[20];
+    snprintf(lbl, sizeof(lbl), "%u. %s", idx + 1, a < APP_COUNT ? APPS[a].name : "---");
+    u8g2.drawStr(cL() + 3, y + 10, lbl);
+    u8g2.setDrawColor(1);
+  }
+  NavHint hints[4] = {{H_UP, ""}, {H_DOWN, ""}, {H_TEXT, "Mv"}, {H_LEFT, ""}};
+  if (appGrab) strcpy(hints[2].label, "OK");   // grabbed: Up/Down now move the app
+  drawNavLegend(hints);
   u8g2.sendBuffer();
 }
 
@@ -774,6 +846,7 @@ static void render() {
     case PAGE_CHORD_EDIT:    drawChordEdit();                                            break;
     case PAGE_DASH:          drawDash();                                                 break;
     case PAGE_PCSTATS:       drawPcStatsCfg();                                           break;
+    case PAGE_APPORDER:      drawAppOrder();                                             break;
     case PAGE_SHELLY:        drawShelly();                                               break;
     case PAGE_MUSIC:         drawMusic();                                                break;
   }
@@ -790,6 +863,15 @@ void uiBegin() {
   if (page != PAGE_LAUNCHER) { lastApp = page; lastAppSel = 0; }        // so menu btn resumes it
 }
 Page uiPage()  { return page; }
+
+uint8_t uiAppCount()                   { return APP_COUNT; }
+uint8_t uiGetAppOrder(uint8_t *out)    { return buildAppOrder(out); }
+void    uiSetAppOrder(const uint8_t *order, uint8_t n) {
+  for (uint8_t i = 0; i < APP_ORDER_MAX; i++) settings.appOrder[i] = (i < n) ? order[i] : 0xFF;
+  normalizeAppOrder();
+  saveSettings();
+  if (page == PAGE_LAUNCHER || page == PAGE_APPORDER) displayDirty = true;
+}
 void uiNoteActivity(uint32_t now) { lastActivity = now; blanked = false; displayDirty = true; }
 void uiApplyOrientation() { applyOrientation(); }   // public hooks for the host link
 void uiEnterFlash()       { enterBootloader(); }

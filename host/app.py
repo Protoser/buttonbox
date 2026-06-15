@@ -25,6 +25,7 @@ IDLE_OPTS  = [(0, "Off"), (30, "30 s"), (120, "2 min")]
 CHORD_OPTS = [30, 40, 60, 80]
 BOOT_OPTS  = [(0, "Apps launcher"), (1, "Buttons"), (2, "Timer"), (3, "PC"), (4, "Shelly"),
               (5, "Music"), (6, "Menu")]
+APP_NAMES  = ["Buttons", "Timer", "PC", "Shelly", "Music", "Menu"]  # mirror ui.cpp APPS index order
 PCSTAT_BITS = [("CPU", 0), ("RAM", 1), ("GPU", 2), ("CPU Temp", 3), ("GPU Temp", 4),
                ("VRAM", 5), ("CPU Power", 6), ("GPU Power", 7)]
 PCSTAT_MAX = 5      # box shows up to 5 at once
@@ -176,6 +177,15 @@ class DeviceTab(QWidget):
         bl.addWidget(self.stat_note)
         lay.addWidget(box)
 
+        abox = QGroupBox("Launcher app order — drag to reorder")
+        abl = QVBoxLayout(abox)
+        self.app_list = QListWidget()
+        self.app_list.setDragDropMode(QListWidget.InternalMove)
+        self.app_list.setMaximumHeight(140)
+        self.app_list.model().rowsMoved.connect(lambda *_: self._send_app_order())
+        abl.addWidget(self.app_list)
+        lay.addWidget(abox)
+
         row = QHBoxLayout()
         flash = QPushButton("Put device in Flash Mode")
         flash.clicked.connect(self.link.flash)
@@ -226,6 +236,12 @@ class DeviceTab(QWidget):
             return
         order = self._get_order()
         self.link.set_setting("pcorder", ",".join(str(b) for b in order))
+
+    def _send_app_order(self):
+        if self._loading:
+            return
+        order = [self.app_list.item(i).data(Qt.UserRole) for i in range(self.app_list.count())]
+        self.link.set_setting("apporder", ",".join(str(a) for a in order))
 
     def _update_add_combo(self):
         current = {self.stat_list.item(i).data(Qt.UserRole)
@@ -294,6 +310,16 @@ class DeviceTab(QWidget):
                 item.setData(Qt.UserRole, bit)
                 self.stat_list.addItem(item)
         self._update_add_combo()
+        # Launcher app order — fixed set, drag to reorder; append any the box omits.
+        aorder = cfg.get("apporder", list(range(len(APP_NAMES))))
+        self.app_list.clear()
+        seen = set()
+        for a in list(aorder) + list(range(len(APP_NAMES))):
+            if isinstance(a, int) and 0 <= a < len(APP_NAMES) and a not in seen:
+                item = QListWidgetItem(APP_NAMES[a])
+                item.setData(Qt.UserRole, a)
+                self.app_list.addItem(item)
+                seen.add(a)
         # Non-secret connectivity fields (passwords are never echoed back)
         if "wssid"  in cfg: self.wifi_ssid.setText(cfg["wssid"])
         if "ship"   in cfg: self.shelly_ip.setText(cfg["ship"])

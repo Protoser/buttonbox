@@ -23,7 +23,7 @@ VID_ESP32S3 = 0x303A
 class DeviceLink(QThread):
     connected      = Signal(str)     # port name
     disconnected   = Signal()
-    configReceived = Signal(dict)    # {flip,labels,idle,chord,boot,pcorder,nchords}
+    configReceived = Signal(dict)    # {flip,labels,idle,chord,boot,pcorder,apporder,nchords}
     chordsReceived = Signal(list)    # [{index,members,output}, ...]
     statsRead      = Signal(dict)    # {cpu,ram,gpu,ct,gt}
     lhmStatus      = Signal(bool, str)
@@ -248,7 +248,7 @@ class DeviceLink(QThread):
         for tok in line.split()[1:]:
             if ":" in tok:
                 k, v = tok.split(":", 1)
-                if k == "pcorder":
+                if k in ("pcorder", "apporder"):
                     try:
                         d[k] = [int(x) for x in v.split(",")]
                     except ValueError:

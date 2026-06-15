@@ -16,6 +16,10 @@ static void emitConfig() {
                 settings.chordWindowMs, settings.bootSel);
   for (uint8_t i = 0; i < 5; i++)
     Serial.printf(i == 0 ? "%u" : ",%u", settings.pcStatOrder[i]);
+  Serial.printf(" apporder:");
+  uint8_t ord[APP_ORDER_MAX]; uint8_t an = uiGetAppOrder(ord);
+  for (uint8_t i = 0; i < an; i++)
+    Serial.printf(i == 0 ? "%u" : ",%u", ord[i]);
   Serial.printf(" wssid:%s ship:%s shuser:%s wmode:%u nchords:%u\n",
                 shellyConfig.wifiSsid, shellyConfig.shellyIp,
                 shellyConfig.shellyUser, settings.wifiMode, chordCount);
@@ -42,6 +46,18 @@ static void handleSet(char *args, uint32_t now) {
       settings.pcStatOrder[i] = (idx >= 0 && idx < 8) ? (uint8_t)idx : 0xFF;
       if (*p2 == ',') p2++;
     }
+  }
+  else if (!strcmp(key, "apporder")) {
+    char *p2 = colon + 1;
+    uint8_t ord[APP_ORDER_MAX]; uint8_t n = 0;
+    while (n < APP_ORDER_MAX) {
+      char *end; long idx = strtol(p2, &end, 10);
+      if (end == p2) break;                     // no more numbers
+      ord[n++] = (uint8_t)idx; p2 = end;
+      if (*p2 == ',') p2++; else break;
+    }
+    uiSetAppOrder(ord, n);                       // normalizes + persists
+    uiNoteActivity(now); emitConfig(); return;
   }
   else if (!strcmp(key, "wifi_mode")) {
     settings.wifiMode = (uint8_t)constrain(v, 0, 2);

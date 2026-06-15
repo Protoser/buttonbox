@@ -5,7 +5,7 @@
 enum Page : uint8_t {
   PAGE_LAUNCHER, PAGE_BUTTONS, PAGE_MENU, PAGE_SETTINGS, PAGE_BTNTEST, PAGE_TIMER,
   PAGE_LAPLIST, PAGE_CHORDS, PAGE_CHORD_CAPTURE, PAGE_CHORD_OUTPUT, PAGE_CHORD_EDIT,
-  PAGE_DASH, PAGE_PCSTATS, PAGE_SHELLY, PAGE_MUSIC
+  PAGE_DASH, PAGE_PCSTATS, PAGE_SHELLY, PAGE_MUSIC, PAGE_APPORDER
 };
 
 void uiBegin();                       // display init + apply saved orientation
@@ -17,3 +17,8 @@ void uiHandleMenuButton(uint32_t now); // menu/toggle button: tap=launcher, hold
 void uiHandlePageInput();             // physical-button presses on a non-HOME page
 void uiHandleTimerLap(uint32_t now);  // Lap button: tap=record, hold=undo+open list
 void uiTickDisplay(uint32_t now);     // idle blank + redraw
+
+// Launcher app order — shared with the host link (companion mirrors/edits it).
+uint8_t uiAppCount();                  // number of launcher apps (APPS[])
+uint8_t uiGetAppOrder(uint8_t *out);   // writes the current clean order (>= uiAppCount() bytes), returns count
+void    uiSetAppOrder(const uint8_t *order, uint8_t n);  // apply order from companion, normalize + persist
