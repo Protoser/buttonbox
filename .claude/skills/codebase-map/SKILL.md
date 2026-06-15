@@ -55,6 +55,7 @@ dispatched on the first token. **Change one side, change the other.**
 PC → box:
 - `<key:value ...>` — PC telemetry → `pcStatsApply` (CPU/RAM/GPU/temps/power)
 - `music <state> <title>` — now-playing → `musicApply` (state 0 none/1 play/2 pause)
+- `wled on:.. bri:.. ps:..` — WLED state pushed by the companion → `wledApplyFromCompanion`
 - `get` — request current config; box replies `cfg` + `chd` lines
 - `set <key>:<val>` — change & persist a setting, box replies `cfg`
 - `chord add <mask>:<output>` / `chord del <index>` — edit chords, box replies
@@ -62,9 +63,10 @@ PC → box:
 - (Shelly state pushed from `shelly_poll.py` so the box needn't join WiFi)
 
 Box → PC:
-- `cfg flip:.. labels:.. idle:.. chord:.. boot:.. pcorder:.. nchords:..`
+- `cfg flip:.. labels:.. idle:.. chord:.. boot:.. pcorder:.. wledip:.. nchords:..`
 - `chd <i>:<membersMask>:<output>` — one per configured chord
 - `mctl prev|playpause|next` — media control requests (Music page → companion)
+- `wledcmd on|off|bri+|bri-|ps+|ps-` — WLED control requests (WLED page → companion, AUTO mode)
 
 ## Firmware map (`src/`) — ESP32-S3, PlatformIO + Arduino
 
@@ -87,7 +89,8 @@ input-routing behavior.
 | [hostlink.h](src/hostlink.h)/.cpp | Serial protocol parse/dispatch | See protocol section above. |
 | [pcstats.h](src/pcstats.h)/.cpp | PC-telemetry state + page (`pcStatsApply`) | Fed by `<key:value>` serial lines. |
 | [music.h](src/music.h)/.cpp | Now-playing state + Music page (`musicApply`) | Title is ASCII-sanitized PC-side; box emits `mctl`. *(new, untracked)* |
-| [shelly.h](src/shelly.h)/.cpp | Shelly smart-switch integration | Largest non-UI module; WiFi-auto vs. companion-poll modes. |
+| [shelly.h](src/shelly.h)/.cpp | Shelly smart-switch integration | Largest non-UI module; WiFi-auto vs. companion-poll modes. **Owns the shared WiFi lifecycle** (connect/disconnect by `wifiMode`). |
+| [wled.h](src/wled.h)/.cpp | WLED LED-controller integration | Own task + state; **does not manage WiFi** — piggybacks on Shelly's. Toggle/brightness/preset via JSON; direct-WiFi or companion-routed (`wledcmd`). |
 
 To add an **on-screen app/page**: add a row to `APPS[]` in `ui.cpp`, a small
 primitive-drawn icon fn, and a `Page` enum value — see the project memory note for
@@ -102,6 +105,7 @@ the launcher/nav conventions (legend glyphs, ~107px content column, etc.).
 | [sensors.py](host/sensors.py) | PC sensor reads | psutil (cpu/ram) + LibreHardwareMonitor via pythonnet (gpu/temps/power/vram, needs admin + DLLs in folder). |
 | [media.py](host/media.py) | Now-playing via Windows GSMTC | Optional `winsdk`; degrades gracefully if absent. Sends `music` lines, handles `mctl`. |
 | [shelly_poll.py](host/shelly_poll.py) | Shelly Gen2 HTTP polling | SHA-256 Digest auth, stdlib only; pushes state to box over serial. |
+| [wled_poll.py](host/wled_poll.py) | WLED JSON HTTP poll/control | stdlib only, no auth; `get_state` + power/brightness/preset; precise preset next/prev via `/presets.json`. |
 | [secrets_store.py](host/secrets_store.py) | Encrypted secret store (Shelly pw) | Windows DPAPI, stdlib only; no-op off-Windows. |
 | [pcstats.py](host/pcstats.py) | Headless CLI fallback | Streams stats only, no GUI. |
 | [companion.spec](host/companion.spec) / build.bat | PyInstaller build → `dist/ButtonboxCompanion.exe` | Bundles DLLs under `sys._MEIPASS`. |

@@ -16,6 +16,7 @@ from PySide6.QtCore import QThread, Signal
 import media
 import sensors
 import shelly_poll
+import wled_poll
 
 VID_ESP32S3 = 0x303A
 
@@ -23,7 +24,7 @@ VID_ESP32S3 = 0x303A
 class DeviceLink(QThread):
     connected      = Signal(str)     # port name
     disconnected   = Signal()
-    configReceived = Signal(dict)    # {flip,labels,idle,chord,boot,pcorder,apporder,nchords}
+    configReceived = Signal(dict)    # {flip,labels,idle,chord,boot,pcorder,apporder,apphidden,nchords}
     chordsReceived = Signal(list)    # [{index,members,output}, ...]
     statsRead      = Signal(dict)    # {cpu,ram,gpu,ct,gt}
     lhmStatus      = Signal(bool, str)
@@ -44,6 +45,17 @@ class DeviceLink(QThread):
         self._shelly_toggle_event = threading.Event()
         self._shelly_result: dict | None = None
         self._shelly_lock   = threading.Lock()
+
+        # WLED auto-control state (mode 2: companion polls + drives via PC). Shares
+        # the device's wmode (mirrored on every cfg) with Shelly. Control requests
+        # arrive from the box as "wledcmd <action>" lines and run on _wled_loop.
+        self._wled_mode    = 2
+        self._wled_ip      = ""
+        self._wled_last_ps = -1            # last polled preset, for next/prev cycling
+        self._wled_cmds: queue.Queue = queue.Queue()
+        self._wled_event   = threading.Event()
+        self._wled_result: dict | None = None
+        self._wled_lock    = threading.Lock()
 
         # Latest PC sensor reading, produced by _sensor_loop. An LHM .Update() can
         # block for a while; doing it off the serial thread keeps the telemetry
@@ -104,6 +116,44 @@ class DeviceLink(QThread):
                 with self._shelly_lock:
                     self._shelly_result = st
 
+    def _run_wled_cmd(self, cmd: str):
+        ip = self._wled_ip
+        if   cmd == "on":   wled_poll.set_power(ip, True)
+        elif cmd == "off":  wled_poll.set_power(ip, False)
+        elif cmd.startswith("bri "):                        # absolute brightness, sent on release
+            try:
+                wled_poll.set_brightness(ip, int(cmd.split()[1]))
+            except (ValueError, IndexError):
+                pass
+        elif cmd == "ps+":  wled_poll.cycle_preset(ip, self._wled_last_ps, +1)
+        elif cmd == "ps-":  wled_poll.cycle_preset(ip, self._wled_last_ps, -1)
+
+    def _wled_loop(self):
+        """Background thread: when mode==AUTO and the box has a WLED IP, run any
+        queued control requests then poll state, pushing it back via _wled_result
+        for the serial loop to forward. HTTP never blocks the serial loop."""
+        while self._running:
+            triggered = self._wled_event.wait(timeout=3.0)
+            self._wled_event.clear()
+            if not self._running:
+                break
+            if self._wled_mode != 2 or not self._wled_ip:
+                # Drop any commands queued while not in companion mode.
+                with self._wled_cmds.mutex:
+                    self._wled_cmds.queue.clear()
+                continue
+            if triggered:
+                try:
+                    while True:
+                        self._run_wled_cmd(self._wled_cmds.get_nowait())
+                except queue.Empty:
+                    pass
+            st = wled_poll.get_state(self._wled_ip)
+            if st is not None:
+                self._wled_last_ps = st["ps"]
+                with self._wled_lock:
+                    self._wled_result = st
+
     def _sensor_loop(self):
         """Background thread: read PC sensors at `interval` and cache the latest
         values. A slow LHM .Update() stays off the serial thread, which always
@@ -140,6 +190,8 @@ class DeviceLink(QThread):
 
         shelly_thread = threading.Thread(target=self._shelly_loop, daemon=True, name="shelly-poll")
         shelly_thread.start()
+        wled_thread = threading.Thread(target=self._wled_loop, daemon=True, name="wled-poll")
+        wled_thread.start()
         sensor_thread = threading.Thread(target=self._sensor_loop, daemon=True, name="sensor-read")
         sensor_thread.start()
         music_thread = threading.Thread(target=self._music_loop, daemon=True, name="music-read")
@@ -199,8 +251,10 @@ class DeviceLink(QThread):
                         cfg = self._parse_cfg(line)
                         # Mirror shelly config for auto-polling
                         self._shelly_mode = cfg.get("wmode", self._shelly_mode)
+                        self._wled_mode   = cfg.get("wmode", self._wled_mode)
                         if "ship"   in cfg: self._shelly_ip   = cfg["ship"]
                         if "shuser" in cfg: self._shelly_user = cfg["shuser"]
+                        if "wledip" in cfg: self._wled_ip     = cfg["wledip"]
                         self.configReceived.emit(cfg)
                         exp_chords = cfg.get("nchords", 0)
                         chords = []
@@ -214,6 +268,9 @@ class DeviceLink(QThread):
                                 self.chordsReceived.emit(list(chords))
                     elif line == "shelly_toggle":
                         self._shelly_toggle_event.set()
+                    elif line.startswith("wledcmd "):
+                        self._wled_cmds.put(line[8:].strip())
+                        self._wled_event.set()
                     elif line.startswith("mctl "):
                         self._music_cmds.put(line[5:].strip())
 
@@ -226,6 +283,13 @@ class DeviceLink(QThread):
                            f" voltage:{st['voltage']:.1f} current:{st['current']:.3f}"
                            f" temp:{st['tempC']:.1f}\n")
                     ser.write(msg.encode())
+
+                # Forward any pending WLED state from the background poller
+                with self._wled_lock:
+                    wst = self._wled_result
+                    self._wled_result = None
+                if wst is not None:
+                    ser.write(f"wled on:{int(wst['on'])} bri:{wst['bri']} ps:{wst['ps']}\n".encode())
 
                 time.sleep(self.interval)
             except (serial.SerialException, OSError):
@@ -253,7 +317,7 @@ class DeviceLink(QThread):
                         d[k] = [int(x) for x in v.split(",")]
                     except ValueError:
                         pass
-                elif k in ("wssid", "ship", "shuser"):
+                elif k in ("wssid", "ship", "shuser", "wledip"):
                     d[k] = v          # keep as string
                 else:
                     try:

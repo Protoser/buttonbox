@@ -21,6 +21,7 @@ void loadSettings() {
   { uint8_t adef[APP_ORDER_MAX] = {0,1,2,3,4,5,6,7};
     if (p.getBytes("aord", settings.appOrder, APP_ORDER_MAX) != APP_ORDER_MAX)
       memcpy(settings.appOrder, adef, APP_ORDER_MAX); }
+  settings.appHidden = p.getUChar("ahid", 0);
   settings.wifiMode = p.getUChar("wmode", 2);
   p.end();
 }
@@ -35,6 +36,7 @@ void saveSettings() {
   p.putUChar("boot", settings.bootSel);
   p.putBytes("pcord", settings.pcStatOrder, 5);
   p.putBytes("aord", settings.appOrder, APP_ORDER_MAX);
+  p.putUChar("ahid", settings.appHidden);
   p.putUChar("wmode", settings.wifiMode);
   p.end();
 }

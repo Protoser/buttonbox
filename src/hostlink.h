@@ -9,7 +9,7 @@
 //   flash                      -> enter the bootloader
 //
 // Replies (device -> app):
-//   cfg flip:.. labels:.. idle:.. chord:.. boot:.. pcorder:i,i,i,i,i apporder:i,.. nchords:..
+//   cfg flip:.. labels:.. idle:.. chord:.. boot:.. pcorder:i,i,i,i,i apporder:i,.. apphidden:mask nchords:..
 //   chd <i>:<membersMask>:<output>      (one per chord)
 #pragma once
 #include <Arduino.h>

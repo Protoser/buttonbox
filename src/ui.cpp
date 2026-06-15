@@ -8,6 +8,7 @@
 #include "pcstats.h"
 #include "shelly.h"
 #include "music.h"
+#include "wled.h"
 #include "esp32-hal-tinyusb.h"   // usb_persist_restart()
 
 // ----------------------------------------------------------------------------
@@ -19,6 +20,16 @@ static int8_t sel  = 0;
 // Remembered app page+selection so the menu button resumes where you left off.
 static Page   lastApp    = PAGE_BUTTONS;
 static int8_t lastAppSel = 0;
+
+// WLED page: which control SELECT has focused (0=power, 1=brightness, 2=preset).
+static uint8_t wledFocus = 0;
+// Brightness hold-adjust: while a button is held the value scrolls locally and is
+// only sent to the device on release.
+static bool     wledBriActive = false;
+static int      wledBriValue  = 0;     // pending brightness shown while adjusting
+static uint32_t wledBriStepAt = 0;
+static const uint8_t  WLED_BRI_STEP      = 8;
+static const uint16_t WLED_BRI_REPEAT_MS = 70;
 
 static const char *MENU_ITEMS[]     = {"Button Test", "Chords", "Settings", "App Order", "Flash Mode", "Back"};
 static const uint8_t MENU_COUNT     = 6;
@@ -83,8 +94,10 @@ static void iconMenu(int cx, int cy);
 static void iconPc(int cx, int cy);
 static void iconShelly(int cx, int cy);
 static void iconMusic(int cx, int cy);
+static void iconWled(int cx, int cy);
 
 struct App { const char *name; void (*drawIcon)(int cx, int cy); Page page; };
+// New apps append here so existing persisted app indices (appOrder/appHidden) stay valid.
 static const App APPS[] = {
   {"Buttons", iconButtons, PAGE_BUTTONS},
   {"Timer",   iconTimer,   PAGE_TIMER},
@@ -92,6 +105,7 @@ static const App APPS[] = {
   {"Shelly",  iconShelly,  PAGE_SHELLY},
   {"Music",   iconMusic,   PAGE_MUSIC},
   {"Menu",    iconMenu,    PAGE_MENU},
+  {"WLED",    iconWled,    PAGE_WLED},
 };
 static const uint8_t APP_COUNT = sizeof(APPS) / sizeof(APPS[0]);
 
@@ -119,7 +133,21 @@ static void normalizeAppOrder() {
   for (uint8_t i = n; i < APP_ORDER_MAX; i++) settings.appOrder[i] = 0xFF;
 }
 
-static bool appGrab = false;   // PAGE_APPORDER: true = Up/Down move the selected app
+// True if app index `a` is the Menu launcher — it can never be hidden.
+static bool appIsMenu(uint8_t a) { return a < APP_COUNT && APPS[a].page == PAGE_MENU; }
+
+// Launcher order with hidden apps removed. Returns the visible count (>= 1, since
+// Menu is never hidden).
+static uint8_t buildVisibleOrder(uint8_t out[APP_COUNT]) {
+  uint8_t ord[APP_COUNT];
+  uint8_t n = buildAppOrder(ord);
+  uint8_t v = 0;
+  for (uint8_t i = 0; i < n; i++)
+    if (!(settings.appHidden & (1u << ord[i]))) out[v++] = ord[i];
+  return v;
+}
+
+static bool appGrab = false;   // PAGE_APPORDER: true = the selected app is picked up (move / hide)
 
 // ----------------------------------------------------------------------------
 //  Actions
@@ -158,12 +186,15 @@ static void confirmCapture() {
 // Nav-button dispatch (a: 0=UP 1=DOWN 2=SELECT 3=BACK).
 static void handleNav(uint8_t a) {
   switch (page) {
-    case PAGE_LAUNCHER:
+    case PAGE_LAUNCHER: {
+      uint8_t vis[APP_COUNT]; uint8_t vn = buildVisibleOrder(vis);
+      if (sel >= vn) sel = vn - 1;
       if      (a == NAV_UP)     { if (sel > 0) sel--; }
-      else if (a == NAV_DOWN)   { if (sel < APP_COUNT - 1) sel++; }
-      else if (a == NAV_SELECT) { uint8_t ord[APP_COUNT]; buildAppOrder(ord); gotoPage(APPS[ord[sel]].page); return; }
+      else if (a == NAV_DOWN)   { if (sel < vn - 1) sel++; }
+      else if (a == NAV_SELECT) { gotoPage(APPS[vis[sel]].page); return; }
       else if (a == NAV_BACK)   { gotoPage(lastApp); sel = lastAppSel; return; }
       break;
+    }
 
     case PAGE_MENU:
       if      (a == NAV_UP)   { if (sel > 0) sel--; }
@@ -257,6 +288,21 @@ static void handleNav(uint8_t a) {
       else if (a == NAV_BACK)   { gotoPage(PAGE_LAUNCHER); return; }
       break;
 
+    case PAGE_WLED:
+      // SELECT cycles the focused control; Up/Down act on it (3 nav buttons, 5 actions).
+      // Brightness (focus 1) is press-and-hold: see uiHandleWledBright().
+      if      (a == NAV_SELECT) wledFocus = (wledFocus + 1) % 3;
+      else if (a == NAV_BACK)   { gotoPage(PAGE_LAUNCHER); return; }
+      else if (a == NAV_UP) {
+        if      (wledFocus == 0) wledPowerOn();
+        else if (wledFocus == 2) wledPresetNext();
+      }
+      else if (a == NAV_DOWN) {
+        if      (wledFocus == 0) wledPowerOff();
+        else if (wledFocus == 2) wledPresetPrev();
+      }
+      break;
+
     case PAGE_MUSIC:
       if      (a == NAV_UP)     musicSendCmd("prev");
       else if (a == NAV_DOWN)   musicSendCmd("next");
@@ -288,11 +334,21 @@ static void handleNav(uint8_t a) {
     }
 
     case PAGE_APPORDER:
-      // Up/Down move the cursor; Select grabs the app so Up/Down then move it.
-      // Back drops + saves. settings.appOrder is normalized on entry, so the
-      // first APP_COUNT slots are a clean permutation we can swap in place.
-      if      (a == NAV_BACK)   { appGrab = false; gotoPage(PAGE_MENU); return; }
-      else if (a == NAV_SELECT) { appGrab = !appGrab; }
+      // Browse: Up/Down move the cursor, Select picks the app up, Back exits.
+      // Picked up: Up/Down move it, Select hides/shows it (Menu locked), Back drops.
+      // settings.appOrder is normalized on entry, so the first APP_COUNT slots
+      // are a clean permutation we can swap in place.
+      if (a == NAV_BACK) {
+        if (appGrab) appGrab = false;                      // drop, back to browse
+        else { gotoPage(PAGE_MENU); return; }
+      }
+      else if (a == NAV_SELECT) {
+        if (!appGrab) appGrab = true;                      // pick up for move / hide
+        else {                                             // picked up: toggle hidden
+          uint8_t app = settings.appOrder[sel];
+          if (!appIsMenu(app)) { settings.appHidden ^= (1u << app); saveSettings(); }
+        }
+      }
       else if (a == NAV_UP) {
         if (appGrab && sel > 0) {
           uint8_t t = settings.appOrder[sel]; settings.appOrder[sel] = settings.appOrder[sel - 1]; settings.appOrder[sel - 1] = t; sel--; saveSettings();
@@ -570,20 +626,33 @@ static void iconMusic(int cx, int cy) {              // eighth note
   u8g2.drawLine(cx - 1, cy - 6, cx + 4, cy - 4);     // flag
   u8g2.drawLine(cx - 1, cy - 2, cx + 4, cy);
 }
+static void iconWled(int cx, int cy) {               // light bulb with rays
+  u8g2.drawCircle(cx, cy - 2, 5);                    // glass bulb
+  u8g2.drawHLine(cx - 3, cy + 4, 6);                 // base
+  u8g2.drawHLine(cx - 2, cy + 6, 4);
+  u8g2.drawLine(cx - 9, cy - 2, cx - 6, cy - 2);     // side rays
+  u8g2.drawLine(cx + 6, cy - 2, cx + 9, cy - 2);
+  u8g2.drawLine(cx, cy - 11, cx, cy - 8);            // top ray
+}
 
 // App launcher: 3-column icon grid (right of the nav legend); selected cell
 // gets a frame. The left legend shows what the 4 nav buttons do here:
 // Up / Down move the highlight, Select (►) opens, Back (◄) resumes last app.
 static void drawLauncher() {
   u8g2.clearBuffer();
-  const uint8_t cols = 3, cellW = 36, cellH = 32;
+  const uint8_t cols = 3, cellW = 36, cellH = 32, visRows = 2;  // 2 rows fit the 64px panel
   const int gx = cL();                                // grid starts past the legend
   u8g2.setFont(u8g2_font_5x7_tr);
-  uint8_t ord[APP_COUNT]; buildAppOrder(ord);
-  for (uint8_t i = 0; i < APP_COUNT; i++) {
-    const App &app = APPS[ord[i]];
+  uint8_t vis[APP_COUNT]; uint8_t vn = buildVisibleOrder(vis);
+  if (sel >= vn) sel = vn - 1;
+  // Scroll vertically so the selected cell's row stays on screen when apps overflow 2 rows.
+  uint8_t selRow   = sel / cols;
+  uint8_t startRow = (selRow >= visRows) ? (selRow - visRows + 1) : 0;
+  for (uint8_t i = 0; i < vn; i++) {
     uint8_t c = i % cols, r = i / cols;
-    int x0 = gx + c * cellW, y0 = r * cellH;
+    if (r < startRow || r >= startRow + visRows) continue;   // outside the scroll window
+    const App &app = APPS[vis[i]];
+    int x0 = gx + c * cellW, y0 = (r - startRow) * cellH;
     int cx = x0 + cellW / 2, cy = y0 + 12;
     if (i == sel) u8g2.drawFrame(x0, y0, cellW, cellH);
     app.drawIcon(cx, cy);
@@ -658,8 +727,9 @@ static void drawPcStatsCfg() {
   u8g2.sendBuffer();
 }
 
-// Launcher reorder: a numbered list of apps. Select "grabs" the highlighted app
-// (drawn as an outline instead of a fill); Up/Down then move it. Back saves.
+// Launcher manage page: a list of all apps in order. Select picks the highlighted
+// app up (drawn as an outline); while picked up, Up/Down move it and Select toggles
+// its visibility (hidden apps show "off"). Menu can't be hidden. Back drops/exits.
 static void drawAppOrder() {
   drawListHeader("APP ORDER");
   const uint8_t visible = 4;
@@ -668,17 +738,23 @@ static void drawAppOrder() {
     uint8_t idx = start + row;
     uint8_t y = 16 + row * 12;
     uint8_t a = settings.appOrder[idx];
+    bool hidden = (a < APP_COUNT) && (settings.appHidden & (1u << a));
     if (idx == sel) {
-      if (appGrab) u8g2.drawFrame(cL(), y, 110, 12);            // grabbed: outline, text stays normal
+      if (appGrab) u8g2.drawFrame(cL(), y, 110, 12);            // picked up: outline, text stays normal
       else { u8g2.drawBox(cL(), y, 110, 12); u8g2.setDrawColor(0); }
     }
-    char lbl[20];
-    snprintf(lbl, sizeof(lbl), "%u. %s", idx + 1, a < APP_COUNT ? APPS[a].name : "---");
-    u8g2.drawStr(cL() + 3, y + 10, lbl);
+    u8g2.drawStr(cL() + 3, y + 10, a < APP_COUNT ? APPS[a].name : "---");
+    if (hidden) { const char *o = "off"; u8g2.drawStr(cL() + 110 - 4 - u8g2.getStrWidth(o), y + 10, o); }
     u8g2.setDrawColor(1);
   }
-  NavHint hints[4] = {{H_UP, ""}, {H_DOWN, ""}, {H_TEXT, "Mv"}, {H_LEFT, ""}};
-  if (appGrab) strcpy(hints[2].label, "OK");   // grabbed: Up/Down now move the app
+  // Select label: browse = "Mv" (pick up); picked up = hide/show, or "--" for Menu.
+  const char *selLbl = "Mv";
+  if (appGrab) {
+    uint8_t a = settings.appOrder[sel];
+    selLbl = appIsMenu(a) ? "--" : ((settings.appHidden & (1u << a)) ? "Sh" : "Hi");
+  }
+  NavHint hints[4] = {{H_UP, ""}, {H_DOWN, ""}, {H_TEXT, ""}, {H_LEFT, ""}};
+  strncpy(hints[2].label, selLbl, 2); hints[2].label[2] = 0;
   drawNavLegend(hints);
   u8g2.sendBuffer();
 }
@@ -733,6 +809,56 @@ static void drawShelly() {
   snprintf(line, sizeof(line), "%.0fC dev", tmp);         u8g2.drawStr(cL()+2, 43, line);
 
   drawNavLegend(h);
+  u8g2.sendBuffer();
+}
+
+static void drawWled() {
+  uint32_t now = millis();
+  drawListHeader("WLED");
+  NavHint hCtl[4]  = {{H_UP,""},{H_DOWN,""},{H_TEXT,"Fn"},{H_LEFT,""}};  // ► cycles focus
+  NavHint hBack[4] = {{H_NONE,""},{H_NONE,""},{H_NONE,""},{H_LEFT,""}};
+
+  if (settings.wifiMode == WIFI_MODE_OFF) {
+    u8g2.setFont(u8g2_font_6x12_tr);
+    u8g2.drawStr(cL()+2, 38, "WiFi Off");
+    drawNavLegend(hBack);
+    u8g2.sendBuffer();
+    return;
+  }
+  bool companion = shellyCompanionMode();
+  if (!companion && !shellyWifiOk()) {
+    u8g2.setFont(u8g2_font_6x12_tr);
+    u8g2.drawStr(cL()+2, 38, shellyConfig.wifiSsid[0] ? "Connecting..." : "No WiFi set");
+    drawNavLegend(hBack);
+    u8g2.sendBuffer();
+    return;
+  }
+  if (!wledFresh(now)) {
+    u8g2.setFont(u8g2_font_6x12_tr);
+    u8g2.drawStr(cL()+2, 38, companion ? "Via PC..." : "Waiting...");
+    drawNavLegend(hCtl);
+    u8g2.sendBuffer();
+    return;
+  }
+
+  // Three controls; the focused one (SELECT cycles) is highlighted, Up/Down act on it.
+  const char *labels[3] = {"Power", "Bright", "Preset"};
+  char vals[3][12];
+  uint8_t briShown = wledBriActive ? (uint8_t)wledBriValue : wledState.bri;  // scrolling value while held
+  snprintf(vals[0], sizeof(vals[0]), "%s", wledState.on ? "ON" : "OFF");
+  snprintf(vals[1], sizeof(vals[1]), "%u", briShown);
+  if (wledState.preset >= 0) snprintf(vals[2], sizeof(vals[2]), "#%d", wledState.preset);
+  else                       snprintf(vals[2], sizeof(vals[2]), "--");
+
+  u8g2.setFont(u8g2_font_6x12_tr);
+  for (uint8_t r = 0; r < 3; r++) {
+    uint8_t y = 18 + r * 14;
+    if (r == wledFocus) { u8g2.drawBox(cL(), y, 110, 13); u8g2.setDrawColor(0); }
+    u8g2.drawStr(cL()+3, y + 10, labels[r]);
+    u8g2.drawStr(cR()-4 - u8g2.getStrWidth(vals[r]), y + 10, vals[r]);
+    u8g2.setDrawColor(1);
+  }
+  drawNavLegend(hCtl);
   u8g2.sendBuffer();
 }
 
@@ -849,6 +975,7 @@ static void render() {
     case PAGE_APPORDER:      drawAppOrder();                                             break;
     case PAGE_SHELLY:        drawShelly();                                               break;
     case PAGE_MUSIC:         drawMusic();                                                break;
+    case PAGE_WLED:          drawWled();                                                 break;
   }
 }
 
@@ -869,6 +996,13 @@ uint8_t uiGetAppOrder(uint8_t *out)    { return buildAppOrder(out); }
 void    uiSetAppOrder(const uint8_t *order, uint8_t n) {
   for (uint8_t i = 0; i < APP_ORDER_MAX; i++) settings.appOrder[i] = (i < n) ? order[i] : 0xFF;
   normalizeAppOrder();
+  saveSettings();
+  if (page == PAGE_LAUNCHER || page == PAGE_APPORDER) displayDirty = true;
+}
+uint8_t uiGetAppHidden() { return settings.appHidden; }
+void    uiSetAppHidden(uint8_t mask) {
+  for (uint8_t i = 0; i < APP_COUNT; i++) if (appIsMenu(i)) mask &= ~(1u << i);   // Menu stays visible
+  settings.appHidden = mask;
   saveSettings();
   if (page == PAGE_LAUNCHER || page == PAGE_APPORDER) displayDirty = true;
 }
@@ -937,11 +1071,45 @@ void uiHandleTimerLap(uint32_t now) {
   }
 }
 
+// WLED brightness is adjusted by holding Up/Down while "Bright" is focused: the
+// value scrolls locally every WLED_BRI_REPEAT_MS and is sent to the device only
+// once, on release. Self-gating, so it can be called every loop; leaving the page
+// mid-hold also flushes the pending value.
+void uiHandleWledBright(uint32_t now) {
+  Button &upBtn   = navBtns[NUM_NAV - 1 - NAV_UP];
+  Button &downBtn = navBtns[NUM_NAV - 1 - NAV_DOWN];
+  int dir = 0;
+  if      (upBtn.pressed && !downBtn.pressed) dir = +1;
+  else if (downBtn.pressed && !upBtn.pressed) dir = -1;
+
+  bool canAdjust = (page == PAGE_WLED) && (wledFocus == 1) &&
+                   (settings.wifiMode != WIFI_MODE_OFF) && wledFresh(now);
+
+  if (canAdjust && dir != 0) {
+    if (!wledBriActive) {                           // hold just started
+      wledBriActive = true;
+      wledBriValue  = wledState.bri;
+      wledBriStepAt = now - WLED_BRI_REPEAT_MS;     // first step fires immediately
+    }
+    if ((now - wledBriStepAt) >= WLED_BRI_REPEAT_MS) {
+      wledBriValue  = constrain(wledBriValue + dir * WLED_BRI_STEP, 0, 255);
+      wledBriStepAt = now;
+      uiNoteActivity(now);                          // wake + redraw the scrolling number
+    }
+  } else if (wledBriActive) {                       // released (or left brightness focus)
+    wledBriActive = false;
+    wledSetBrightness((uint8_t)wledBriValue);       // send the final value once
+    wledState.bri = (uint8_t)wledBriValue;          // optimistic echo until the next poll
+    uiNoteActivity(now);
+  }
+}
+
 void uiTickDisplay(uint32_t now) {
   bool keepAwake = (page == PAGE_TIMER && swIsRunning()) ||
                    (page == PAGE_DASH && pcStatsFresh(now)) ||
                    (page == PAGE_MUSIC && musicFresh(now)) ||
-                   (page == PAGE_SHELLY && settings.wifiMode != WIFI_MODE_OFF &&
+                   ((page == PAGE_SHELLY || page == PAGE_WLED) &&
+                    settings.wifiMode != WIFI_MODE_OFF &&
                     (shellyWifiOk() || shellyCompanionMode()));
   if (!blanked && !keepAwake && settings.idleBlankSec > 0 &&
       (now - lastActivity) > (uint32_t)settings.idleBlankSec * 1000) {

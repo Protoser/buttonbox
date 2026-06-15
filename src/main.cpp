@@ -18,6 +18,7 @@
 #include "chords.h"
 #include "hostlink.h"
 #include "shelly.h"
+#include "wled.h"
 #include "ui.h"
 
 #if !defined(ARDUINO_USB_MODE) || ARDUINO_USB_MODE != 0
@@ -32,6 +33,7 @@ void setup() {
   loadSettings();
   chordsLoad();
   shellyBegin();
+  wledBegin();
   uiBegin();
   hidBegin();
   Serial.begin(115200);
@@ -54,6 +56,7 @@ void loop() {
   updateChords(now);
 
   if (uiPage() == PAGE_TIMER)   uiHandleTimerLap(now);
+  uiHandleWledBright(now);         // self-gating; handles hold-to-scroll + release flush
 
   uiTickDisplay(now);
 }

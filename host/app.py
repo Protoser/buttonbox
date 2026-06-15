@@ -24,8 +24,9 @@ MAX_CHORDS = 18
 IDLE_OPTS  = [(0, "Off"), (30, "30 s"), (120, "2 min")]
 CHORD_OPTS = [30, 40, 60, 80]
 BOOT_OPTS  = [(0, "Apps launcher"), (1, "Buttons"), (2, "Timer"), (3, "PC"), (4, "Shelly"),
-              (5, "Music"), (6, "Menu")]
-APP_NAMES  = ["Buttons", "Timer", "PC", "Shelly", "Music", "Menu"]  # mirror ui.cpp APPS index order
+              (5, "Music"), (6, "Menu"), (7, "WLED")]
+APP_NAMES  = ["Buttons", "Timer", "PC", "Shelly", "Music", "Menu", "WLED"]  # mirror ui.cpp APPS index order
+MENU_APP   = APP_NAMES.index("Menu")   # never hideable
 PCSTAT_BITS = [("CPU", 0), ("RAM", 1), ("GPU", 2), ("CPU Temp", 3), ("GPU Temp", 4),
                ("VRAM", 5), ("CPU Power", 6), ("GPU Power", 7)]
 PCSTAT_MAX = 5      # box shows up to 5 at once
@@ -177,12 +178,13 @@ class DeviceTab(QWidget):
         bl.addWidget(self.stat_note)
         lay.addWidget(box)
 
-        abox = QGroupBox("Launcher app order — drag to reorder")
+        abox = QGroupBox("Launcher apps — drag to reorder, uncheck to hide (Menu always shown)")
         abl = QVBoxLayout(abox)
         self.app_list = QListWidget()
         self.app_list.setDragDropMode(QListWidget.InternalMove)
         self.app_list.setMaximumHeight(140)
         self.app_list.model().rowsMoved.connect(lambda *_: self._send_app_order())
+        self.app_list.itemChanged.connect(lambda *_: self._send_app_hidden())
         abl.addWidget(self.app_list)
         lay.addWidget(abox)
 
@@ -196,7 +198,7 @@ class DeviceTab(QWidget):
         row.addStretch(1)
         lay.addLayout(row)
 
-        conn = QGroupBox("Connectivity (WiFi + Shelly)")
+        conn = QGroupBox("Connectivity (WiFi + Shelly + WLED)")
         cl = QFormLayout(conn)
         self.wifi_mode_combo = QComboBox()
         for val, lbl in ((2, "Auto — via PC when companion is connected"), (1, "Always On"), (0, "Always Off")):
@@ -214,6 +216,8 @@ class DeviceTab(QWidget):
         self.shelly_pass = QLineEdit(); self.shelly_pass.setEchoMode(QLineEdit.Password)
         self.shelly_pass.setPlaceholderText("Shelly password")
         cl.addRow("Shelly password", self.shelly_pass)
+        self.wled_ip = QLineEdit(); self.wled_ip.setPlaceholderText("e.g. 192.168.1.101")
+        cl.addRow("WLED IP", self.wled_ip)
         conn_apply = QPushButton("Apply")
         conn_apply.clicked.connect(self._apply_connectivity)
         cl.addRow("", conn_apply)
@@ -243,6 +247,21 @@ class DeviceTab(QWidget):
         order = [self.app_list.item(i).data(Qt.UserRole) for i in range(self.app_list.count())]
         self.link.set_setting("apporder", ",".join(str(a) for a in order))
 
+    def _send_app_hidden(self):
+        if self._loading:
+            return
+        mask = 0
+        self.app_list.blockSignals(True)            # enforcing Menu mustn't re-fire itemChanged
+        for i in range(self.app_list.count()):
+            item = self.app_list.item(i)
+            a = item.data(Qt.UserRole)
+            if a == MENU_APP and item.checkState() != Qt.Checked:
+                item.setCheckState(Qt.Checked)
+            if item.checkState() == Qt.Unchecked:
+                mask |= (1 << a)
+        self.app_list.blockSignals(False)
+        self.link.set_setting("apphidden", mask)
+
     def _update_add_combo(self):
         current = {self.stat_list.item(i).data(Qt.UserRole)
                    for i in range(self.stat_list.count())}
@@ -270,7 +289,8 @@ class DeviceTab(QWidget):
 
     def _apply_connectivity(self):
         for k, w in (("wifi_ssid", self.wifi_ssid), ("wifi_pass", self.wifi_pass),
-                     ("shelly_ip", self.shelly_ip), ("shelly_user", self.shelly_user)):
+                     ("shelly_ip", self.shelly_ip), ("shelly_user", self.shelly_user),
+                     ("wled_ip", self.wled_ip)):
             if w.text():
                 self.link.set_setting(k, w.text())
         if self.shelly_pass.text():
@@ -311,19 +331,29 @@ class DeviceTab(QWidget):
                 self.stat_list.addItem(item)
         self._update_add_combo()
         # Launcher app order — fixed set, drag to reorder; append any the box omits.
+        # Each item has a checkbox: checked = shown, unchecked = hidden (Menu locked).
         aorder = cfg.get("apporder", list(range(len(APP_NAMES))))
+        hidden = cfg.get("apphidden", 0)
+        if not isinstance(hidden, int):
+            hidden = 0
         self.app_list.clear()
         seen = set()
         for a in list(aorder) + list(range(len(APP_NAMES))):
             if isinstance(a, int) and 0 <= a < len(APP_NAMES) and a not in seen:
                 item = QListWidgetItem(APP_NAMES[a])
                 item.setData(Qt.UserRole, a)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                shown = a == MENU_APP or not (hidden >> a) & 1
+                item.setCheckState(Qt.Checked if shown else Qt.Unchecked)
+                if a == MENU_APP:                       # Menu can't be hidden
+                    item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
                 self.app_list.addItem(item)
                 seen.add(a)
         # Non-secret connectivity fields (passwords are never echoed back)
         if "wssid"  in cfg: self.wifi_ssid.setText(cfg["wssid"])
         if "ship"   in cfg: self.shelly_ip.setText(cfg["ship"])
         if "shuser" in cfg: self.shelly_user.setText(cfg["shuser"])
+        if "wledip" in cfg: self.wled_ip.setText(cfg["wledip"])
         if "wmode"  in cfg:
             idx = self.wifi_mode_combo.findData(cfg["wmode"])
             if idx >= 0:

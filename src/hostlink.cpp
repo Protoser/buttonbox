@@ -3,6 +3,7 @@
 #include "settings.h"
 #include "shelly.h"
 #include "music.h"
+#include "wled.h"
 #include "chords.h"
 #include "config.h"
 #include "ui.h"
@@ -20,9 +21,10 @@ static void emitConfig() {
   uint8_t ord[APP_ORDER_MAX]; uint8_t an = uiGetAppOrder(ord);
   for (uint8_t i = 0; i < an; i++)
     Serial.printf(i == 0 ? "%u" : ",%u", ord[i]);
-  Serial.printf(" wssid:%s ship:%s shuser:%s wmode:%u nchords:%u\n",
+  Serial.printf(" apphidden:%u", uiGetAppHidden());
+  Serial.printf(" wssid:%s ship:%s shuser:%s wmode:%u wledip:%s nchords:%u\n",
                 shellyConfig.wifiSsid, shellyConfig.shellyIp,
-                shellyConfig.shellyUser, settings.wifiMode, chordCount);
+                shellyConfig.shellyUser, settings.wifiMode, wledIp(), chordCount);
   for (uint8_t i = 0; i < chordCount; i++)
     Serial.printf("chd %u:%lu:%u\n", i, (unsigned long)chords[i].members, chords[i].output);
 }
@@ -59,6 +61,10 @@ static void handleSet(char *args, uint32_t now) {
     uiSetAppOrder(ord, n);                       // normalizes + persists
     uiNoteActivity(now); emitConfig(); return;
   }
+  else if (!strcmp(key, "apphidden")) {
+    uiSetAppHidden((uint8_t)v);                   // forces Menu visible + persists
+    uiNoteActivity(now); emitConfig(); return;
+  }
   else if (!strcmp(key, "wifi_mode")) {
     settings.wifiMode = (uint8_t)constrain(v, 0, 2);
     saveSettings(); shellyRestartWifi(); uiNoteActivity(now); emitConfig(); return;
@@ -83,6 +89,9 @@ static void handleSet(char *args, uint32_t now) {
   else if (!strcmp(key, "shelly_pass")) {
     strncpy(shellyConfig.shellyPass, colon+1, sizeof(shellyConfig.shellyPass)-1);
     shellySaveConfig(); uiNoteActivity(now); emitConfig(); return;
+  }
+  else if (!strcmp(key, "wled_ip")) {
+    wledSetIp(colon+1); uiNoteActivity(now); emitConfig(); return;
   }
   else return;
   saveSettings();
@@ -122,6 +131,7 @@ static void dispatch(char *line, uint32_t now) {
   else if (!strncmp(line, "chord ", 6))   handleChord(line + 6);
   else if (!strcmp(line, "flash"))        uiEnterFlash();
   else if (!strncmp(line, "shelly ", 7))  shellyApplyFromCompanion(line + 7);
+  else if (!strncmp(line, "wled ", 5))    wledApplyFromCompanion(line + 5);
   else if (!strncmp(line, "music ", 6))   musicApply(line + 6, now);
   else                                    pcStatsApply(line, now);   // PC telemetry
 }
