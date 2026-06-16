@@ -19,6 +19,7 @@
 #include "hostlink.h"
 #include "shelly.h"
 #include "wled.h"
+#include "clock.h"
 #include "ui.h"
 
 #if !defined(ARDUINO_USB_MODE) || ARDUINO_USB_MODE != 0
@@ -34,6 +35,7 @@ void setup() {
   chordsLoad();
   shellyBegin();
   wledBegin();
+  clockBegin();
   uiBegin();
   hidBegin();
   Serial.begin(115200);
@@ -45,6 +47,7 @@ void loop() {
 
   buttonsUpdate(now);
   hostlinkUpdate(now);            // drain serial: PC telemetry + config commands
+  clockUpdate(now);               // bring up NTP once WiFi is associated
   if (buttonsAnyEdge())         uiNoteActivity(now);
   uiHandleMenuButton(now);        // tap = launcher/resume, hold = quick-switch app
 

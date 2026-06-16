@@ -4,11 +4,13 @@
 #include "shelly.h"
 #include "music.h"
 #include "wled.h"
+#include "beamng.h"
 #include "chords.h"
 #include "config.h"
+#include "clock.h"
 #include "ui.h"
 
-static char    lineBuf[96];
+static char    lineBuf[128];
 static uint8_t lineLen = 0;
 
 static void emitConfig() {
@@ -133,6 +135,8 @@ static void dispatch(char *line, uint32_t now) {
   else if (!strncmp(line, "shelly ", 7))  shellyApplyFromCompanion(line + 7);
   else if (!strncmp(line, "wled ", 5))    wledApplyFromCompanion(line + 5);
   else if (!strncmp(line, "music ", 6))   musicApply(line + 6, now);
+  else if (!strncmp(line, "beamng ", 7))  beamngApply(line + 7, now);
+  else if (!strncmp(line, "time ", 5))    clockApplyHost(line + 5, now);
   else                                    pcStatsApply(line, now);   // PC telemetry
 }
 

@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo \"[project rule] Before reading or editing any code for a non-trivial change, invoke the codebase-map skill first (unless you already ran it earlier this session). If this prompt is a pure question or trivial one-liner, you may skip it.\""
+          }
+        ]
+      }
+    ]
+  }
+}

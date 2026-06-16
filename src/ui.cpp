@@ -9,6 +9,8 @@
 #include "shelly.h"
 #include "music.h"
 #include "wled.h"
+#include "beamng.h"
+#include "clock.h"
 #include "esp32-hal-tinyusb.h"   // usb_persist_restart()
 
 // ----------------------------------------------------------------------------
@@ -20,6 +22,10 @@ static int8_t sel  = 0;
 // Remembered app page+selection so the menu button resumes where you left off.
 static Page   lastApp    = PAGE_BUTTONS;
 static int8_t lastAppSel = 0;
+
+// BeamNG page: which sub-view is shown (cycled with Up/Down). See drawBeamng().
+static uint8_t beamngView = 0;
+static const uint8_t BEAMNG_VIEWS = 4;   // OVERVIEW / DASH / STATUS / LIGHTS
 
 // WLED page: which control SELECT has focused (0=power, 1=brightness, 2=preset).
 static uint8_t wledFocus = 0;
@@ -95,6 +101,7 @@ static void iconPc(int cx, int cy);
 static void iconShelly(int cx, int cy);
 static void iconMusic(int cx, int cy);
 static void iconWled(int cx, int cy);
+static void iconBeamng(int cx, int cy);
 
 struct App { const char *name; void (*drawIcon)(int cx, int cy); Page page; };
 // New apps append here so existing persisted app indices (appOrder/appHidden) stay valid.
@@ -106,6 +113,7 @@ static const App APPS[] = {
   {"Music",   iconMusic,   PAGE_MUSIC},
   {"Menu",    iconMenu,    PAGE_MENU},
   {"WLED",    iconWled,    PAGE_WLED},
+  {"BeamNG",  iconBeamng,  PAGE_BEAMNG},
 };
 static const uint8_t APP_COUNT = sizeof(APPS) / sizeof(APPS[0]);
 
@@ -310,6 +318,14 @@ static void handleNav(uint8_t a) {
       else if (a == NAV_BACK)   { gotoPage(PAGE_LAUNCHER); return; }
       break;
 
+    case PAGE_BEAMNG:
+      // Up/Down (and Select) cycle the read-only telemetry sub-views.
+      if      (a == NAV_UP)     beamngView = (beamngView + BEAMNG_VIEWS - 1) % BEAMNG_VIEWS;
+      else if (a == NAV_DOWN)   beamngView = (beamngView + 1) % BEAMNG_VIEWS;
+      else if (a == NAV_SELECT) beamngView = (beamngView + 1) % BEAMNG_VIEWS;
+      else if (a == NAV_BACK)   { gotoPage(PAGE_LAUNCHER); return; }
+      break;
+
     case PAGE_PCSTATS: {
       if      (a == NAV_UP)   { if (sel > 0) sel--; }
       else if (a == NAV_DOWN) { if (sel < PCSTAT_TOTAL - 1) sel++; }
@@ -373,10 +389,23 @@ static void handleNav(uint8_t a) {
 static uint8_t cL() { return settings.flipped ? 0 : 18; }   // left edge of content
 static uint8_t cR() { return settings.flipped ? 110 : 128; } // right edge of content (exclusive)
 
+// Small HH:MM clock centered in the header strip, between the left-aligned title
+// and any right-aligned indicator. Drawn only once the time is known (NTP or PC).
+static void drawHeaderClock() {
+  uint8_t h, m;
+  if (!clockGet(h, m)) return;
+  char t[6];
+  snprintf(t, sizeof(t), "%02u:%02u", h, m);
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(64 - u8g2.getStrWidth(t) / 2, 9, t);
+}
+
 static void drawListHeader(const char *title) {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_6x12_tr);
   u8g2.drawStr(0, 10, title);
+  drawHeaderClock();
+  u8g2.setFont(u8g2_font_6x12_tr);   // restore: callers draw body text after the header
   u8g2.drawHLine(0, 13, 128);
 }
 
@@ -472,7 +501,7 @@ static void drawList(const char *title, const char *const *items, uint8_t count,
 }
 
 static void drawBtnTest() {
-  drawListHeader("BUTTON TEST");
+  drawListHeader("BTN TEST");
   u8g2.setFont(u8g2_font_6x12_tr);
   if (testLastHid < 0) u8g2.drawStr(0, 34, "Press any button");
   else {
@@ -494,7 +523,7 @@ static void fmtTime(uint32_t ms, char *buf, size_t n) {
 
 static void drawTimer() {
   uint32_t e = swElapsed(millis());
-  drawListHeader("STOPWATCH");
+  drawListHeader("TIMER");
   char buf[16]; fmtTime(e, buf, sizeof(buf));
   u8g2.setFont(u8g2_font_10x20_tr);
   u8g2.drawStr(cL() + (110 - u8g2.getStrWidth(buf)) / 2, 40, buf);
@@ -558,7 +587,7 @@ static void drawChords() {
 }
 
 static void drawCapture() {
-  drawListHeader("ADD CHORD");
+  drawListHeader("ADD CHD");
   u8g2.setFont(u8g2_font_5x7_tr);
   u8g2.drawStr(0, 24, "Tap buttons to add/remove");
   char buf[40]; fmtMembers(captureMask, buf, sizeof(buf));
@@ -569,7 +598,7 @@ static void drawCapture() {
 }
 
 static void drawChordOutput() {
-  drawListHeader(editingOutput ? "EDIT OUTPUT" : "OUTPUT");
+  drawListHeader(editingOutput ? "EDIT OUT" : "OUTPUT");
   char mem[24]; fmtMembers(editingOutput ? chords[editChord].members : pendingMembers, mem, sizeof(mem));
   u8g2.setFont(u8g2_font_6x12_tr); u8g2.drawStr(cL()+2, 30, mem);
   char line[20]; snprintf(line, sizeof(line), "-> button %u", outputSel + 1);
@@ -579,7 +608,7 @@ static void drawChordOutput() {
 }
 
 static void drawChordEdit() {
-  drawListHeader("EDIT CHORD");
+  drawListHeader("EDIT CHD");
   char outItem[16]; snprintf(outItem, sizeof(outItem), "Output: %u", chords[editChord].output + 1);
   const char *items[3] = {outItem, "Delete", "Back"};
   for (uint8_t row = 0; row < 3; row++) {
@@ -633,6 +662,14 @@ static void iconWled(int cx, int cy) {               // light bulb with rays
   u8g2.drawLine(cx - 9, cy - 2, cx - 6, cy - 2);     // side rays
   u8g2.drawLine(cx + 6, cy - 2, cx + 9, cy - 2);
   u8g2.drawLine(cx, cy - 11, cx, cy - 8);            // top ray
+}
+static void iconBeamng(int cx, int cy) {             // round gauge with a needle
+  u8g2.drawCircle(cx, cy, 8);
+  u8g2.drawPixel(cx - 5, cy - 5);                    // dial ticks
+  u8g2.drawPixel(cx + 5, cy - 5);
+  u8g2.drawPixel(cx, cy - 7);
+  u8g2.drawLine(cx, cy, cx + 4, cy - 4);             // needle
+  u8g2.drawDisc(cx, cy, 1);                          // hub
 }
 
 // App launcher: 3-column icon grid (right of the nav legend); selected cell
@@ -731,7 +768,7 @@ static void drawPcStatsCfg() {
 // app up (drawn as an outline); while picked up, Up/Down move it and Select toggles
 // its visibility (hidden apps show "off"). Menu can't be hidden. Back drops/exits.
 static void drawAppOrder() {
-  drawListHeader("APP ORDER");
+  drawListHeader("APP ORD");
   const uint8_t visible = 4;
   uint8_t start = (sel >= visible) ? (sel - visible + 1) : 0;
   for (uint8_t row = 0; row < visible && (start + row) < APP_COUNT; row++) {
@@ -957,6 +994,255 @@ static void drawMusic() {
   u8g2.sendBuffer();
 }
 
+// ---- BeamNG telemetry: read-only dash, Up/Down (or Select) cycle the sub-views ----
+static void beamngGearStr(char *buf, size_t n) {
+  if      (beamng.gear <= 0) snprintf(buf, n, "R");   // 0 = reverse (and <0 safety)
+  else if (beamng.gear == 1) snprintf(buf, n, "N");
+  else                       snprintf(buf, n, "%d", beamng.gear - 1);
+}
+static const char *beamngUnitStr() { return beamng.unit ? "mph" : "km/h"; }
+
+// RPM bar scaled to the largest RPM seen this session — OutGauge carries no
+// redline, so the bar self-calibrates; DL_SHIFT is the real upshift cue and
+// lights the whole bar.
+static uint16_t beamngRpmMax = 6000;
+static void drawRpmBar(int x, int y, int w, int h, const char *txt = nullptr) {
+  if (beamng.rpm > beamngRpmMax) beamngRpmMax = beamng.rpm;
+  u8g2.drawFrame(x, y, w, h);
+  if (txt) {
+    u8g2.setFont(u8g2_font_5x7_tr);
+    u8g2.drawStr(x + (w - u8g2.getStrWidth(txt)) / 2, y + (h + 7) / 2, txt);
+  }
+  int inner = w - 2;
+  int fill = (beamng.lights & DL_SHIFT) ? inner
+           : (int)((long)beamng.rpm * inner / (beamngRpmMax ? beamngRpmMax : 1));
+  if (fill > 0) {
+    if (fill > inner) fill = inner;
+    u8g2.setDrawColor(2);                      // XOR so any text inside stays readable
+    u8g2.drawBox(x + 1, y + 1, fill, h - 2);
+    u8g2.setDrawColor(1);
+  }
+}
+
+// A labelled value bar with the text drawn inside; the fill XORs over the text so
+// it stays readable as the bar grows.
+static void drawValueBar(int x, int y, int w, int h, int val, int vmin, int vmax, const char *txt) {
+  u8g2.drawFrame(x, y, w, h);
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(x + (w - u8g2.getStrWidth(txt)) / 2, y + (h + 7) / 2, txt);
+  if (vmax > vmin) {
+    int inner = w - 2;
+    int fill = (int)((long)(constrain(val, vmin, vmax) - vmin) * inner / (vmax - vmin));
+    if (fill > 0) { u8g2.setDrawColor(2); u8g2.drawBox(x + 1, y + 1, fill, h - 2); u8g2.setDrawColor(1); }
+  }
+}
+
+// Filled blinker arrow centered at (cx,cy), pointing left or right.
+static void drawBlinkArrow(int cx, int cy, bool left) {
+  if (left) u8g2.drawTriangle(cx + 4, cy - 5, cx + 4, cy + 5, cx - 4, cy);
+  else      u8g2.drawTriangle(cx - 4, cy - 5, cx - 4, cy + 5, cx + 4, cy);
+}
+
+struct BeamLight { const char *lbl; uint32_t bit; };
+
+// Warning-light pictograms for the overview, ~16x12 centered on (cx,cy).
+typedef void (*WarnIconFn)(int cx, int cy);
+static void wiHandbrake(int cx, int cy) {            // (!) brake warning
+  u8g2.drawCircle(cx, cy, 5);
+  u8g2.drawVLine(cx, cy - 3, 4);
+  u8g2.drawPixel(cx, cy + 3);
+}
+static void wiOil(int cx, int cy) {                  // oil pressure: genie lamp + drop
+  u8g2.drawDisc(cx + 2, cy, 3);                              // reservoir (right)
+  u8g2.drawTriangle(cx + 2, cy - 3, cx + 2, cy + 2, cx - 6, cy);  // spout tapering left
+  u8g2.drawHLine(cx + 5, cy - 2, 2);                         // small handle
+  u8g2.drawDisc(cx - 6, cy + 3, 1);                          // drop under the spout
+}
+static void wiBattery(int cx, int cy) {              // battery with + / - signs
+  u8g2.drawFrame(cx - 6, cy - 2, 12, 7);
+  u8g2.drawBox(cx - 4, cy - 4, 2, 2);
+  u8g2.drawBox(cx + 2, cy - 4, 2, 2);
+  u8g2.drawHLine(cx - 4, cy + 1, 3);                                 // minus
+  u8g2.drawHLine(cx + 1, cy + 1, 3); u8g2.drawVLine(cx + 2, cy, 3);  // plus
+}
+static void wiAbs(int cx, int cy) {                  // ABS in a ring
+  u8g2.drawCircle(cx, cy, 6);
+  u8g2.setFont(u8g2_font_4x6_tr);
+  u8g2.drawStr(cx - 6, cy + 3, "ABS");
+}
+static void wiTc(int cx, int cy) {                   // TC in a ring
+  u8g2.drawCircle(cx, cy, 6);
+  u8g2.setFont(u8g2_font_4x6_tr);
+  u8g2.drawStr(cx - 4, cy + 3, "TC");
+}
+static void wiBeam(int cx, int cy) {                 // high beam: D + straight rays (rays on the right)
+  u8g2.drawVLine(cx - 1, cy - 5, 11);
+  u8g2.drawLine(cx - 1, cy - 5, cx - 5, cy - 3);
+  u8g2.drawVLine(cx - 5, cy - 3, 7);
+  u8g2.drawLine(cx - 5, cy + 3, cx - 1, cy + 5);
+  for (int r = -3; r <= 3; r += 3) u8g2.drawHLine(cx + 2, cy + r, 3);
+}
+struct WarnIcon { uint32_t bit; WarnIconFn draw; };
+// Priority order for the overview strip (first active ones shown, top-down).
+static const WarnIcon WARN_ICONS[6] = {
+  {DL_HANDBRAKE, wiHandbrake}, {DL_OILWARN, wiOil}, {DL_BATTERY, wiBattery},
+  {DL_ABS, wiAbs}, {DL_TC, wiTc}, {DL_FULLBEAM, wiBeam},
+};
+
+static void drawBeamngOverview() {
+  const int stripW = 18;                              // right column for warning lights
+  const int xL = cL() + 2;
+  const int xR = cR() - stripW;                       // left content region right edge
+  const int WL = xR - xL;
+
+  // Tall RPM bar across the top, its top edge on the header line, rpm value inside.
+  char rpmTxt[12]; snprintf(rpmTxt, sizeof(rpmTxt), "%u rpm", beamng.rpm);
+  drawRpmBar(xL, 13, WL, 16, rpmTxt);
+
+  // Gear at far left, speed centered after it, blinkers flanking the speed.
+  char g[4]; beamngGearStr(g, sizeof(g));
+  u8g2.setFont(u8g2_font_6x12_tr);
+  u8g2.drawStr(xL, 43, g);
+  int gW = u8g2.getStrWidth(g);
+  char spd[10]; snprintf(spd, sizeof(spd), "%u%s", beamng.speed, beamngUnitStr());
+  int sW = u8g2.getStrWidth(spd);
+  int sx = (xL + gW + 10 + xR - sW) / 2;
+  if (sx < xL + gW + 12) sx = xL + gW + 12;
+  if (sx + sW > xR)      sx = xR - sW;
+  u8g2.drawStr(sx, 43, spd);
+  if (beamng.lights & DL_SIGNAL_L) drawBlinkArrow(sx - 6, 39, true);
+  if (beamng.lights & DL_SIGNAL_R) drawBlinkArrow(sx + sW + 6, 39, false);
+
+  // Three slim value bars (fuel / engine / oil), number inside each, side by side.
+  int bw = (WL - 4) / 3;
+  char nb[8];
+  snprintf(nb, sizeof(nb), "F%u", beamng.fuel);    drawValueBar(xL,            50, bw, 13, beamng.fuel,    0, 100, nb);
+  snprintf(nb, sizeof(nb), "E%d", beamng.engTemp); drawValueBar(xL + bw + 2,   50, bw, 13, beamng.engTemp, 30, 120, nb);
+  snprintf(nb, sizeof(nb), "O%d", beamng.oilTemp); drawValueBar(xL + 2*bw + 4, 50, bw, 13, beamng.oilTemp, 30, 120, nb);
+
+  // Active warning lights as icons stacked from the top of the right column (up
+  // to 4). Inactive ones don't appear; turn signals live by the speed, not here.
+  int icx = cR() - stripW / 2;
+  int shown = 0;
+  for (uint8_t i = 0; i < 6 && shown < 4; i++) {
+    if (!(beamng.lights & WARN_ICONS[i].bit)) continue;
+    WARN_ICONS[i].draw(icx, 21 + shown * 12);
+    shown++;
+  }
+}
+
+static void drawBeamngDash() {
+  int x = cL() + 2, w = (cR() - 2) - x;
+  drawRpmBar(x, 16, w, 9);
+
+  char g[4]; beamngGearStr(g, sizeof(g));
+  u8g2.setFont(u8g2_font_10x20_tr);
+  u8g2.drawStr(x, 50, g);                              // big gear, left
+
+  char spd[6]; snprintf(spd, sizeof(spd), "%u", beamng.speed);
+  int sW = u8g2.getStrWidth(spd);
+  int sx = (cR() - 2) - sW - 10;                       // big speed toward the right
+  u8g2.drawStr(sx, 46, spd);
+
+  u8g2.setFont(u8g2_font_5x7_tr);
+  const char *u = beamngUnitStr();
+  u8g2.drawStr(sx + (sW - u8g2.getStrWidth(u)) / 2, 58, u);   // unit centered under speed
+  char r[12]; snprintf(r, sizeof(r), "%u rpm", beamng.rpm);
+  u8g2.drawStr(x, 62, r);
+
+  // Blinkers left & right of the speed.
+  if (beamng.lights & DL_SIGNAL_L) drawBlinkArrow(sx - 8, 37, true);
+  if (beamng.lights & DL_SIGNAL_R) drawBlinkArrow(cR() - 6, 37, false);
+}
+
+static void drawBeamngStatus() {
+  const int xl = cL() + 2, xr = cR() - 2, lblW = 26;
+  const char *lbl[4] = {"Fuel", "Eng", "Oil", "Turbo"};
+  int val[4]  = {beamng.fuel, beamng.engTemp, beamng.oilTemp, beamng.turbo};
+  int vmin[4] = {0, 30, 30, 0};
+  int vmax[4] = {100, 120, 120, 20};
+  char txt[4][10];
+  snprintf(txt[0], sizeof(txt[0]), "%u%%", beamng.fuel);
+  snprintf(txt[1], sizeof(txt[1]), "%dC", beamng.engTemp);
+  snprintf(txt[2], sizeof(txt[2]), "%dC", beamng.oilTemp);
+  if (beamng.turboFlag) snprintf(txt[3], sizeof(txt[3]), "%u.%ub", beamng.turbo / 10, beamng.turbo % 10);
+  else                { snprintf(txt[3], sizeof(txt[3]), "--"); vmax[3] = vmin[3]; }  // empty bar
+  u8g2.setFont(u8g2_font_5x7_tr);
+  for (uint8_t i = 0; i < 4; i++) {
+    int y = 16 + i * 12;
+    u8g2.drawStr(xl, y + 9, lbl[i]);
+    drawValueBar(xl + lblW, y, xr - (xl + lblW), 11, val[i], vmin[i], vmax[i], txt[i]);
+  }
+}
+
+static void drawBeamngLights() {
+  const BeamLight items[8] = {
+    {"HBRK", DL_HANDBRAKE}, {"ABS",  DL_ABS},
+    {"TC",   DL_TC},        {"OIL",  DL_OILWARN},
+    {"BATT", DL_BATTERY},   {"BEAM", DL_FULLBEAM},
+    {"LEFT", DL_SIGNAL_L},  {"RIGHT",DL_SIGNAL_R},
+  };
+  u8g2.setFont(u8g2_font_5x7_tr);
+  const int cw = 52, ch = 11;
+  for (uint8_t i = 0; i < 8; i++) {
+    int col = i % 2, row = i / 2;
+    int x = cL() + 2 + col * (cw + 2);
+    int y = 16 + row * (ch + 1);
+    if (beamng.lights & items[i].bit) { u8g2.drawBox(x, y, cw, ch); u8g2.setDrawColor(0); }
+    else                                u8g2.drawFrame(x, y, cw, ch);
+    u8g2.drawStr(x + 3, y + 8, items[i].lbl);
+    u8g2.setDrawColor(1);
+  }
+}
+
+// Centered status icon for the two "no data" states (no caption text).
+static void drawBeamngNoPc(int cx, int cy) {           // monitor with a slash = no PC link
+  u8g2.drawFrame(cx - 15, cy - 11, 30, 20);
+  u8g2.drawHLine(cx - 6, cy + 12, 12);
+  u8g2.drawVLine(cx, cy + 9, 3);
+  u8g2.drawLine(cx - 17, cy + 11, cx + 17, cy - 13);
+}
+static void drawBeamngIdle(int cx, int cy) {           // parked car = BeamNG not driving
+  u8g2.drawBox(cx - 15, cy, 30, 6);                    // body
+  u8g2.drawFrame(cx - 9, cy - 7, 18, 8);               // cabin
+  u8g2.drawDisc(cx - 9, cy + 8, 3);                    // wheels
+  u8g2.drawDisc(cx + 9, cy + 8, 3);
+}
+
+static void drawBeamng() {
+  uint32_t now = millis();
+  static const char *VIEW_NAMES[BEAMNG_VIEWS] = {"OVERVIEW", "DASH", "STATUS", "LIGHTS"};
+  drawListHeader("BEAMNG");
+  u8g2.setFont(u8g2_font_5x7_tr);
+  const char *vn = VIEW_NAMES[beamngView % BEAMNG_VIEWS];
+  u8g2.drawStr(126 - u8g2.getStrWidth(vn), 9, vn);    // view tag, right of the header
+
+  NavHint h[4] = {{H_UP, ""}, {H_DOWN, ""}, {H_NONE, ""}, {H_LEFT, ""}};
+  int icx = (cL() + cR()) / 2;
+
+  if (!beamngFresh(now)) {                             // no companion / serial link
+    drawBeamngNoPc(icx, 36);
+    drawNavLegend(h);
+    u8g2.sendBuffer();
+    return;
+  }
+  if (!beamng.active) {                                // companion up, BeamNG not driving
+    drawBeamngIdle(icx, 34);
+    drawNavLegend(h);
+    u8g2.sendBuffer();
+    return;
+  }
+
+  switch (beamngView) {
+    case 0: drawBeamngOverview(); break;
+    case 1: drawBeamngDash();     break;
+    case 2: drawBeamngStatus();   break;
+    case 3: drawBeamngLights();   break;
+  }
+  drawNavLegend(h);
+  u8g2.sendBuffer();
+}
+
 static void render() {
   switch (page) {
     case PAGE_LAUNCHER:      drawLauncher();                                             break;
@@ -976,6 +1262,7 @@ static void render() {
     case PAGE_SHELLY:        drawShelly();                                               break;
     case PAGE_MUSIC:         drawMusic();                                                break;
     case PAGE_WLED:          drawWled();                                                 break;
+    case PAGE_BEAMNG:        drawBeamng();                                               break;
   }
 }
 
@@ -1108,6 +1395,7 @@ void uiTickDisplay(uint32_t now) {
   bool keepAwake = (page == PAGE_TIMER && swIsRunning()) ||
                    (page == PAGE_DASH && pcStatsFresh(now)) ||
                    (page == PAGE_MUSIC && musicFresh(now)) ||
+                   (page == PAGE_BEAMNG && beamngFresh(now)) ||
                    ((page == PAGE_SHELLY || page == PAGE_WLED) &&
                     settings.wifiMode != WIFI_MODE_OFF &&
                     (shellyWifiOk() || shellyCompanionMode()));

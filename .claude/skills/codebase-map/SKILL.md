@@ -55,6 +55,8 @@ dispatched on the first token. **Change one side, change the other.**
 PC → box:
 - `<key:value ...>` — PC telemetry → `pcStatsApply` (CPU/RAM/GPU/temps/power)
 - `music <state> <title>` — now-playing → `musicApply` (state 0 none/1 play/2 pause)
+- `time <epochUTC> <offsetSec>` — clock sync → `clockApplyHost` (header clock; box has
+  no RTC — also self-syncs via NTP over WiFi, ticks on the system clock, sent hourly)
 - `wled on:.. bri:.. ps:..` — WLED state pushed by the companion → `wledApplyFromCompanion`
 - `get` — request current config; box replies `cfg` + `chd` lines
 - `set <key>:<val>` — change & persist a setting, box replies `cfg`
@@ -91,6 +93,7 @@ input-routing behavior.
 | [music.h](src/music.h)/.cpp | Now-playing state + Music page (`musicApply`) | Title is ASCII-sanitized PC-side; box emits `mctl`. *(new, untracked)* |
 | [shelly.h](src/shelly.h)/.cpp | Shelly smart-switch integration | Largest non-UI module; WiFi-auto vs. companion-poll modes. **Owns the shared WiFi lifecycle** (connect/disconnect by `wifiMode`). |
 | [wled.h](src/wled.h)/.cpp | WLED LED-controller integration | Own task + state; **does not manage WiFi** — piggybacks on Shelly's. Toggle/brightness/preset via JSON; direct-WiFi or companion-routed (`wledcmd`). |
+| [clock.h](src/clock.h)/.cpp | Header wall-clock time (`clockApplyHost`/`clockGet`) | No RTC: synced by NTP (configTime, piggybacks Shelly's WiFi, hourly) or PC `time` line; ticks on the ESP32 system clock. TZ offset learned from the PC, persisted to NVS. |
 
 To add an **on-screen app/page**: add a row to `APPS[]` in `ui.cpp`, a small
 primitive-drawn icon fn, and a `Page` enum value — see the project memory note for

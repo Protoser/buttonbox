@@ -24,8 +24,8 @@ MAX_CHORDS = 18
 IDLE_OPTS  = [(0, "Off"), (30, "30 s"), (120, "2 min")]
 CHORD_OPTS = [30, 40, 60, 80]
 BOOT_OPTS  = [(0, "Apps launcher"), (1, "Buttons"), (2, "Timer"), (3, "PC"), (4, "Shelly"),
-              (5, "Music"), (6, "Menu"), (7, "WLED")]
-APP_NAMES  = ["Buttons", "Timer", "PC", "Shelly", "Music", "Menu", "WLED"]  # mirror ui.cpp APPS index order
+              (5, "Music"), (6, "Menu"), (7, "WLED"), (8, "BeamNG")]
+APP_NAMES  = ["Buttons", "Timer", "PC", "Shelly", "Music", "Menu", "WLED", "BeamNG"]  # mirror ui.cpp APPS index order
 MENU_APP   = APP_NAMES.index("Menu")   # never hideable
 PCSTAT_BITS = [("CPU", 0), ("RAM", 1), ("GPU", 2), ("CPU Temp", 3), ("GPU Temp", 4),
                ("VRAM", 5), ("CPU Power", 6), ("GPU Power", 7)]

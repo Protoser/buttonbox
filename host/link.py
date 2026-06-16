@@ -13,6 +13,7 @@ import serial
 import serial.tools.list_ports as list_ports
 from PySide6.QtCore import QThread, Signal
 
+import beamng
 import media
 import sensors
 import shelly_poll
@@ -36,6 +37,7 @@ class DeviceLink(QThread):
         self._cmds = queue.Queue()
         self._running = True
         self._reconnect_after = 0.0   # epoch timestamp; pause port scan until then
+        self._last_time_sent  = 0.0   # epoch of last clock sync sent (resent hourly)
 
         # Shelly auto-polling state (mode 2: companion polls via PC)
         self._shelly_mode  = 2        # mirrors device wmode; 0=off 1=on 2=auto
@@ -70,6 +72,13 @@ class DeviceLink(QThread):
         self._music: dict = {"state": 0, "title": ""}
         self._music_lock = threading.Lock()
         self._music_cmds: queue.Queue = queue.Queue()
+
+        # BeamNG OutGauge telemetry, produced by _beamng_loop (blocking UDP recv
+        # stays off the serial thread). _beamng_ts is a monotonic stamp the serial
+        # loop uses to decide "BeamNG actively driving" vs idle.
+        self._beamng: dict = {}
+        self._beamng_ts: float = 0.0
+        self._beamng_lock = threading.Lock()
 
     # ---- called from the GUI thread (just enqueue; the thread does the I/O) ----
     def send(self, line):       self._cmds.put(line)
@@ -184,6 +193,30 @@ class DeviceLink(QThread):
                     self._music = vals
             time.sleep(1.0)
 
+    def _beamng_loop(self):
+        """Background thread: own the OutGauge UDP socket, block for the latest
+        packet and cache it with a timestamp. The blocking recv stays off the
+        serial thread; the serial loop only ever reads the cached dict."""
+        listener = beamng.Listener()
+        opened = False
+        while self._running:
+            if not opened:
+                opened = listener.open()
+                if not opened:
+                    time.sleep(2.0)    # port busy / unavailable -> retry later
+                    continue
+            try:
+                vals = listener.recv_latest(timeout=0.5)
+            except OSError:
+                listener.close()
+                opened = False
+                continue
+            if vals is not None:
+                with self._beamng_lock:
+                    self._beamng = vals
+                    self._beamng_ts = time.monotonic()
+        listener.close()
+
     def run(self):
         ok, err = sensors.init()
         self.lhmStatus.emit(ok, "" if ok else str(err))
@@ -196,11 +229,14 @@ class DeviceLink(QThread):
         sensor_thread.start()
         music_thread = threading.Thread(target=self._music_loop, daemon=True, name="music-read")
         music_thread.start()
+        beamng_thread = threading.Thread(target=self._beamng_loop, daemon=True, name="beamng-read")
+        beamng_thread.start()
 
         ser = None
         buf = b""
         exp_chords = 0
         chords = []
+        last_slow = 0.0          # monotonic of last slow telemetry write (sensors/music/clock)
 
         while self._running:
             # --- (re)connect ---
@@ -216,6 +252,7 @@ class DeviceLink(QThread):
                     ser = serial.Serial(port, 115200, timeout=0)
                     time.sleep(0.3)
                     buf = b""
+                    self._last_time_sent = 0.0      # push the clock right after reconnecting
                     self.connected.emit(port)
                     self._cmds.put("get")
                 except Exception:           # noqa: BLE001
@@ -229,17 +266,44 @@ class DeviceLink(QThread):
                     cmd = self._cmds.get_nowait()
                     ser.write((cmd + "\n").encode())
 
-                # Write the most recent cached sensor values (read on _sensor_loop)
-                with self._stats_lock:
-                    vals = dict(self._latest_stats)
-                if vals:
-                    self.statsRead.emit(vals)
-                    ser.write((sensors.encode(vals) + "\n").encode())
+                # Slow telemetry (sensors / now-playing / clock) only needs ~0.5 s;
+                # BeamNG below is sent every fast tick, so gate these on self.interval.
+                now = time.monotonic()
+                if now - last_slow >= self.interval:
+                    last_slow = now
+                    # Write the most recent cached sensor values (read on _sensor_loop)
+                    with self._stats_lock:
+                        vals = dict(self._latest_stats)
+                    if vals:
+                        self.statsRead.emit(vals)
+                        ser.write((sensors.encode(vals) + "\n").encode())
 
-                # Now-playing line for the Music page (state + sanitized title)
-                with self._music_lock:
-                    m = dict(self._music)
-                ser.write(f"music {m['state']} {m['title']}\n".encode())
+                    # Now-playing line for the Music page (state + sanitized title)
+                    with self._music_lock:
+                        m = dict(self._music)
+                    ser.write(f"music {m['state']} {m['title']}\n".encode())
+
+                    # Clock sync for the header clock (box has no RTC): UTC epoch + local
+                    # offset. Sent on connect then hourly -- the box keeps ticking on its
+                    # own system clock and also re-syncs from NTP, so no steady stream.
+                    if time.time() - self._last_time_sent >= 3600:
+                        lt = time.localtime()
+                        off = -(time.altzone if lt.tm_isdst > 0 else time.timezone)
+                        ser.write(f"time {int(time.time())} {off}\n".encode())
+                        self._last_time_sent = time.time()
+
+                # BeamNG telemetry -- sent every fast tick (~100 ms) so turn signals
+                # and the RPM bar track the game. act:1 only while packets are arriving
+                # (driving); otherwise act:0 so the box shows "BeamNG idle".
+                with self._beamng_lock:
+                    b = dict(self._beamng)
+                    bts = self._beamng_ts
+                if b and (time.monotonic() - bts) < 1.0:
+                    ser.write((f"beamng act:1 gear:{b['gear']} spd:{b['spd']} unit:{b['unit']} "
+                               f"rpm:{b['rpm']} fuel:{b['fuel']} et:{b['et']} ot:{b['ot']} "
+                               f"tb:{b['tb']} tf:{b['tf']} lights:{b['lights']}\n").encode())
+                else:
+                    ser.write(b"beamng act:0\n")
 
                 buf += ser.read(4096)
                 while b"\n" in buf:
@@ -291,7 +355,7 @@ class DeviceLink(QThread):
                 if wst is not None:
                     ser.write(f"wled on:{int(wst['on'])} bri:{wst['bri']} ps:{wst['ps']}\n".encode())
 
-                time.sleep(self.interval)
+                time.sleep(0.1)          # fast tick: BeamNG at ~10 Hz, slow telemetry gated above
             except (serial.SerialException, OSError):
                 try:
                     ser.close()
