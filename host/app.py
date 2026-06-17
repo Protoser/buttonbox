@@ -1,17 +1,22 @@
 """Buttonbox companion — system-tray app that streams PC stats to the box and
 reads/edits its settings and chords live. Starts minimized to the tray.
 
+The window is a left-sidebar settings app: a short list of focused panes
+(Monitor / Display / Apps / Chords / Network / Device) rather than a few
+overloaded tabs, so each screen stays small and single-purpose. A persistent
+header shows the connection state from every pane.
+
 Run:   python app.py        (or pythonw app.py for no console)
 """
 import os
 import sys
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFormLayout, QGridLayout, QGroupBox,
+    QApplication, QCheckBox, QComboBox, QFormLayout, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
-    QProgressBar, QPushButton, QSystemTrayIcon, QTabWidget, QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
 import secrets_store
@@ -88,14 +93,50 @@ def members_str(mask):
     return "+".join(str(i + 1) for i in range(NUM_HID) if mask & (1 << i)) or "(none)"
 
 
-# ------------------------------------------------------------------- tabs ------
-class MonitorTab(QWidget):
+def pane_title(text):
+    """A bold heading at the top of a sidebar pane."""
+    lbl = QLabel(text)
+    f = lbl.font(); f.setBold(True); f.setPointSize(f.pointSize() + 2); lbl.setFont(f)
+    lbl.setStyleSheet("margin-bottom: 6px;")
+    return lbl
+
+
+# ------------------------------------------------------------------ panes ------
+class SettingsPane(QWidget):
+    """Base for panes that push a setting on change and reload it from `cfg`.
+
+    `_loading` guards the change handlers so loading device config doesn't echo
+    a `set` straight back. Each pane reads only the cfg keys it owns, so the
+    window can fan a single `cfg` line out to every pane.
+    """
+
+    def __init__(self, link):
+        super().__init__()
+        self.link = link
+        self._loading = False
+
+    def _set(self, key, val):
+        if not self._loading and val is not None:
+            self.link.set_setting(key, val)
+
+    def _sel(self, combo, val):
+        idx = combo.findData(val)
+        if idx < 0:
+            combo.addItem(str(val), val)
+            idx = combo.findData(val)
+        combo.setCurrentIndex(idx)
+
+    def load(self, cfg):        # overridden by panes that own settings
+        pass
+
+
+class MonitorPane(QWidget):
+    """Live read-out: PC stat bars the box is currently being fed."""
+
     def __init__(self):
         super().__init__()
         lay = QVBoxLayout(self)
-        self.status = QLabel("Disconnected")
-        self.status.setStyleSheet("font-weight: bold;")
-        lay.addWidget(self.status)
+        lay.addWidget(pane_title("Monitor"))
         self.bars = {}
         form = QFormLayout()
         for key, label, unit, mn, mx in STAT_ROWS:
@@ -118,12 +159,13 @@ class MonitorTab(QWidget):
                 bar.setValue(max(mn, min(mx, vals[key])))
 
 
-class DeviceTab(QWidget):
+class DisplayPane(SettingsPane):
+    """How the box screen looks: orientation, grid labels, idle blank, boot screen."""
+
     def __init__(self, link):
-        super().__init__()
-        self.link = link
-        self._loading = False
+        super().__init__(link)
         lay = QVBoxLayout(self)
+        lay.addWidget(pane_title("Display"))
         form = QFormLayout()
 
         self.flip = QCheckBox("Mounted upside-down (rotate 180°)")
@@ -142,18 +184,42 @@ class DeviceTab(QWidget):
         self.idle.currentIndexChanged.connect(lambda: self._set("idle", self.idle.currentData()))
         form.addRow("Idle blank", self.idle)
 
-        self.chord = QComboBox()
-        for val in CHORD_OPTS:
-            self.chord.addItem(f"{val} ms", val)
-        self.chord.currentIndexChanged.connect(lambda: self._set("chord", self.chord.currentData()))
-        form.addRow("Chord window", self.chord)
-
         self.boot = QComboBox()
         for val, text in BOOT_OPTS:
             self.boot.addItem(text, val)
         self.boot.currentIndexChanged.connect(lambda: self._set("boot", self.boot.currentData()))
         form.addRow("Boot screen", self.boot)
+
         lay.addLayout(form)
+        lay.addStretch(1)
+
+    def load(self, cfg):
+        self._loading = True
+        self.flip.setChecked(bool(cfg.get("flip", 0)))
+        self._sel(self.labels, cfg.get("labels", 0))
+        self._sel(self.idle, cfg.get("idle", 0))
+        self._sel(self.boot, cfg.get("boot", 1))
+        self._loading = False
+
+
+class AppsPane(SettingsPane):
+    """What content appears on the box: launcher app order/visibility and the
+    PC-stats picker (which stats the PC page shows, up to PCSTAT_MAX)."""
+
+    def __init__(self, link):
+        super().__init__(link)
+        lay = QVBoxLayout(self)
+        lay.addWidget(pane_title("Apps & PC stats"))
+
+        abox = QGroupBox("Launcher apps — drag to reorder, uncheck to hide (Menu always shown)")
+        abl = QVBoxLayout(abox)
+        self.app_list = QListWidget()
+        self.app_list.setDragDropMode(QListWidget.InternalMove)
+        self.app_list.setMaximumHeight(150)
+        self.app_list.model().rowsMoved.connect(lambda *_: self._send_app_order())
+        self.app_list.itemChanged.connect(lambda *_: self._send_app_hidden())
+        abl.addWidget(self.app_list)
+        lay.addWidget(abox)
 
         box = QGroupBox(f"PC stats shown on the box — drag to reorder (up to {PCSTAT_MAX})")
         bl = QVBoxLayout(box)
@@ -177,56 +243,7 @@ class DeviceTab(QWidget):
         self.stat_note.setStyleSheet("color: #888;")
         bl.addWidget(self.stat_note)
         lay.addWidget(box)
-
-        abox = QGroupBox("Launcher apps — drag to reorder, uncheck to hide (Menu always shown)")
-        abl = QVBoxLayout(abox)
-        self.app_list = QListWidget()
-        self.app_list.setDragDropMode(QListWidget.InternalMove)
-        self.app_list.setMaximumHeight(140)
-        self.app_list.model().rowsMoved.connect(lambda *_: self._send_app_order())
-        self.app_list.itemChanged.connect(lambda *_: self._send_app_hidden())
-        abl.addWidget(self.app_list)
-        lay.addWidget(abox)
-
-        row = QHBoxLayout()
-        flash = QPushButton("Put device in Flash Mode")
-        flash.clicked.connect(self.link.flash)
-        row.addWidget(flash)
-        refresh = QPushButton("Refresh")
-        refresh.clicked.connect(self.link.request_config)
-        row.addWidget(refresh)
-        row.addStretch(1)
-        lay.addLayout(row)
-
-        conn = QGroupBox("Connectivity (WiFi + Shelly + WLED)")
-        cl = QFormLayout(conn)
-        self.wifi_mode_combo = QComboBox()
-        for val, lbl in ((2, "Auto — via PC when companion is connected"), (1, "Always On"), (0, "Always Off")):
-            self.wifi_mode_combo.addItem(lbl, val)
-        cl.addRow("WiFi Mode", self.wifi_mode_combo)
-        self.wifi_ssid = QLineEdit(); self.wifi_ssid.setPlaceholderText("e.g. MyHomeNetwork")
-        cl.addRow("WiFi SSID", self.wifi_ssid)
-        self.wifi_pass = QLineEdit(); self.wifi_pass.setEchoMode(QLineEdit.Password)
-        self.wifi_pass.setPlaceholderText("WiFi password")
-        cl.addRow("WiFi password", self.wifi_pass)
-        self.shelly_ip = QLineEdit(); self.shelly_ip.setPlaceholderText("e.g. 192.168.1.100")
-        cl.addRow("Shelly IP", self.shelly_ip)
-        self.shelly_user = QLineEdit(); self.shelly_user.setPlaceholderText("admin")
-        cl.addRow("Shelly user", self.shelly_user)
-        self.shelly_pass = QLineEdit(); self.shelly_pass.setEchoMode(QLineEdit.Password)
-        self.shelly_pass.setPlaceholderText("Shelly password")
-        cl.addRow("Shelly password", self.shelly_pass)
-        self.wled_ip = QLineEdit(); self.wled_ip.setPlaceholderText("e.g. 192.168.1.101")
-        cl.addRow("WLED IP", self.wled_ip)
-        conn_apply = QPushButton("Apply")
-        conn_apply.clicked.connect(self._apply_connectivity)
-        cl.addRow("", conn_apply)
-        lay.addWidget(conn)
         lay.addStretch(1)
-
-    def _set(self, key, val):
-        if not self._loading and val is not None:
-            self.link.set_setting(key, val)
 
     def _get_order(self):
         bits = [self.stat_list.item(i).data(Qt.UserRole)
@@ -287,18 +304,6 @@ class DeviceTab(QWidget):
         self._update_add_combo()
         self._send_order()
 
-    def _apply_connectivity(self):
-        for k, w in (("wifi_ssid", self.wifi_ssid), ("wifi_pass", self.wifi_pass),
-                     ("shelly_ip", self.shelly_ip), ("shelly_user", self.shelly_user),
-                     ("wled_ip", self.wled_ip)):
-            if w.text():
-                self.link.set_setting(k, w.text())
-        if self.shelly_pass.text():
-            self.link.set_setting("shelly_pass", self.shelly_pass.text())
-            self.link.set_shelly_pass(self.shelly_pass.text())
-            secrets_store.set_secret("shelly_pass", self.shelly_pass.text())  # encrypted (DPAPI)
-        self.link.set_setting("wifi_mode", self.wifi_mode_combo.currentData())
-
     def _remove_stat(self):
         row = self.stat_list.currentRow()
         if row >= 0:
@@ -307,20 +312,8 @@ class DeviceTab(QWidget):
             self._update_add_combo()
             self._send_order()
 
-    def _sel(self, combo, val):
-        idx = combo.findData(val)
-        if idx < 0:
-            combo.addItem(str(val), val)
-            idx = combo.findData(val)
-        combo.setCurrentIndex(idx)
-
     def load(self, cfg):
         self._loading = True
-        self.flip.setChecked(bool(cfg.get("flip", 0)))
-        self._sel(self.labels, cfg.get("labels", 0))
-        self._sel(self.idle, cfg.get("idle", 0))
-        self._sel(self.chord, cfg.get("chord", 40))
-        self._sel(self.boot, cfg.get("boot", 1))
         order = cfg.get("pcorder", [0, 1, 2, 3, 4])
         self.stat_list.clear()
         for bit in order:
@@ -349,24 +342,27 @@ class DeviceTab(QWidget):
                     item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
                 self.app_list.addItem(item)
                 seen.add(a)
-        # Non-secret connectivity fields (passwords are never echoed back)
-        if "wssid"  in cfg: self.wifi_ssid.setText(cfg["wssid"])
-        if "ship"   in cfg: self.shelly_ip.setText(cfg["ship"])
-        if "shuser" in cfg: self.shelly_user.setText(cfg["shuser"])
-        if "wledip" in cfg: self.wled_ip.setText(cfg["wledip"])
-        if "wmode"  in cfg:
-            idx = self.wifi_mode_combo.findData(cfg["wmode"])
-            if idx >= 0:
-                self.wifi_mode_combo.setCurrentIndex(idx)
         self._loading = False
 
 
-class ChordsTab(QWidget):
+class ChordsPane(SettingsPane):
+    """Chord rules and their timing window — pressing the members together emits
+    the output button. The chord-window setting lives here with the chords it
+    governs (it arrives on the `cfg` line; the list on `chd` lines)."""
+
     def __init__(self, link):
-        super().__init__()
-        self.link = link
+        super().__init__(link)
         self.chords = []
         lay = QVBoxLayout(self)
+        lay.addWidget(pane_title("Chords"))
+
+        form = QFormLayout()
+        self.chord = QComboBox()
+        for val in CHORD_OPTS:
+            self.chord.addItem(f"{val} ms", val)
+        self.chord.currentIndexChanged.connect(lambda: self._set("chord", self.chord.currentData()))
+        form.addRow("Chord window", self.chord)
+        lay.addLayout(form)
 
         lay.addWidget(QLabel("Current chords (press the members together → emit the output):"))
         self.list = QListWidget()
@@ -402,7 +398,12 @@ class ChordsTab(QWidget):
         self.note.setStyleSheet("color: #888;")
         lay.addWidget(self.note)
 
-    def load(self, chords):
+    def load(self, cfg):
+        self._loading = True
+        self._sel(self.chord, cfg.get("chord", 40))
+        self._loading = False
+
+    def set_chords(self, chords):
         self.chords = chords
         self.list.clear()
         for c in chords:
@@ -430,6 +431,96 @@ class ChordsTab(QWidget):
             self.link.del_chord(self.chords[row]["index"])
 
 
+class NetworkPane(SettingsPane):
+    """WiFi + Shelly + WLED connectivity. Edits are staged in the fields and
+    pushed together on Apply (the password also goes to the encrypted store)."""
+
+    def __init__(self, link):
+        super().__init__(link)
+        lay = QVBoxLayout(self)
+        lay.addWidget(pane_title("Connectivity"))
+
+        cl = QFormLayout()
+        self.wifi_mode_combo = QComboBox()
+        for val, lbl in ((2, "Auto — via PC when companion is connected"), (1, "Always On"), (0, "Always Off")):
+            self.wifi_mode_combo.addItem(lbl, val)
+        cl.addRow("WiFi Mode", self.wifi_mode_combo)
+        self.wifi_ssid = QLineEdit(); self.wifi_ssid.setPlaceholderText("e.g. MyHomeNetwork")
+        cl.addRow("WiFi SSID", self.wifi_ssid)
+        self.wifi_pass = QLineEdit(); self.wifi_pass.setEchoMode(QLineEdit.Password)
+        self.wifi_pass.setPlaceholderText("WiFi password")
+        cl.addRow("WiFi password", self.wifi_pass)
+        self.shelly_ip = QLineEdit(); self.shelly_ip.setPlaceholderText("e.g. 192.168.1.100")
+        cl.addRow("Shelly IP", self.shelly_ip)
+        self.shelly_user = QLineEdit(); self.shelly_user.setPlaceholderText("admin")
+        cl.addRow("Shelly user", self.shelly_user)
+        self.shelly_pass = QLineEdit(); self.shelly_pass.setEchoMode(QLineEdit.Password)
+        self.shelly_pass.setPlaceholderText("Shelly password")
+        cl.addRow("Shelly password", self.shelly_pass)
+        self.wled_ip = QLineEdit(); self.wled_ip.setPlaceholderText("e.g. 192.168.1.101")
+        cl.addRow("WLED IP", self.wled_ip)
+        conn_apply = QPushButton("Apply")
+        conn_apply.clicked.connect(self._apply_connectivity)
+        cl.addRow("", conn_apply)
+        lay.addLayout(cl)
+        lay.addStretch(1)
+
+    def _apply_connectivity(self):
+        for k, w in (("wifi_ssid", self.wifi_ssid), ("wifi_pass", self.wifi_pass),
+                     ("shelly_ip", self.shelly_ip), ("shelly_user", self.shelly_user),
+                     ("wled_ip", self.wled_ip)):
+            if w.text():
+                self.link.set_setting(k, w.text())
+        if self.shelly_pass.text():
+            self.link.set_setting("shelly_pass", self.shelly_pass.text())
+            self.link.set_shelly_pass(self.shelly_pass.text())
+            secrets_store.set_secret("shelly_pass", self.shelly_pass.text())  # encrypted (DPAPI)
+        self.link.set_setting("wifi_mode", self.wifi_mode_combo.currentData())
+
+    def load(self, cfg):
+        self._loading = True
+        # Non-secret connectivity fields (passwords are never echoed back)
+        if "wssid"  in cfg: self.wifi_ssid.setText(cfg["wssid"])
+        if "ship"   in cfg: self.shelly_ip.setText(cfg["ship"])
+        if "shuser" in cfg: self.shelly_user.setText(cfg["shuser"])
+        if "wledip" in cfg: self.wled_ip.setText(cfg["wledip"])
+        if "wmode"  in cfg:
+            idx = self.wifi_mode_combo.findData(cfg["wmode"])
+            if idx >= 0:
+                self.wifi_mode_combo.setCurrentIndex(idx)
+        self._loading = False
+
+
+class DevicePane(QWidget):
+    """Device actions: flash mode, re-read config, and Windows autostart."""
+
+    def __init__(self, link):
+        super().__init__()
+        self.link = link
+        lay = QVBoxLayout(self)
+        lay.addWidget(pane_title("Device"))
+
+        row = QHBoxLayout()
+        flash = QPushButton("Put device in Flash Mode")
+        flash.clicked.connect(self.link.flash)
+        row.addWidget(flash)
+        refresh = QPushButton("Refresh")
+        refresh.clicked.connect(self.link.request_config)
+        row.addWidget(refresh)
+        row.addStretch(1)
+        lay.addLayout(row)
+
+        self.autostart = QCheckBox("Start companion at login")
+        lay.addWidget(self.autostart)
+
+        hint = QLabel("Flash Mode reboots the box into its bootloader so you can upload "
+                      "new firmware; the companion reconnects automatically.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888;")
+        lay.addWidget(hint)
+        lay.addStretch(1)
+
+
 # ---------------------------------------------------------------- window -------
 class MainWindow(QMainWindow):
     def __init__(self, link, tray):
@@ -438,38 +529,83 @@ class MainWindow(QMainWindow):
         self.tray = tray
         self._quitting = False
         self.setWindowTitle("Buttonbox Companion")
-        self.resize(420, 460)
+        self.resize(580, 470)
 
-        self.monitor = MonitorTab()
-        self.device = DeviceTab(link)
-        self.chords = ChordsTab(link)
-        tabs = QTabWidget()
-        tabs.addTab(self.monitor, "Monitor")
-        tabs.addTab(self.device, "Device")
-        tabs.addTab(self.chords, "Chords")
-        self.setCentralWidget(tabs)
+        self.monitor = MonitorPane()
+        self.display = DisplayPane(link)
+        self.apps = AppsPane(link)
+        self.chords = ChordsPane(link)
+        self.network = NetworkPane(link)
+        self.device = DevicePane(link)
+        panes = [("Monitor", self.monitor), ("Display", self.display), ("Apps", self.apps),
+                 ("Chords", self.chords), ("Network", self.network), ("Device", self.device)]
+
+        self.nav = QListWidget()
+        self.nav.setFixedWidth(132)
+        self.nav.setFrameShape(QFrame.NoFrame)
+        # Drive the rail from the window's own palette so it blends with the panes
+        # on any theme (light or dark). Hard-coded colours looked like a white slab.
+        pal = self.palette()
+        win_col = pal.color(QPalette.Window).name()
+        div_col = pal.color(QPalette.Mid).name()
+        hl_col  = pal.color(QPalette.Highlight).name()
+        hlt_col = pal.color(QPalette.HighlightedText).name()
+        txt_col = pal.color(QPalette.WindowText).name()
+        self.nav.setStyleSheet(
+            f"QListWidget {{ background: {win_col}; border: none;"
+            f" border-right: 1px solid {div_col}; outline: 0; }}"
+            f"QListWidget::item {{ padding: 9px 14px; border: none; color: {txt_col}; }}"
+            f"QListWidget::item:selected {{ background: {hl_col}; color: {hlt_col}; }}")
+        self.stack = QStackedWidget()
+        for name, pane in panes:
+            self.nav.addItem(QListWidgetItem(name))
+            self.stack.addWidget(pane)
+        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
+        self.nav.setCurrentRow(0)
+
+        self.status = QLabel("Disconnected — searching for device…")
+        self.status.setStyleSheet("font-weight: bold; padding: 8px 10px; color: #c62828;")
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.addWidget(self.nav)
+        body.addWidget(self.stack, 1)
+        root = QVBoxLayout()
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(self.status)
+        root.addLayout(body, 1)
+        central = QWidget()
+        central.setLayout(root)
+        self.setCentralWidget(central)
 
         link.connected.connect(self._on_connected)
         link.disconnected.connect(self._on_disconnected)
         link.statsRead.connect(self.monitor.set_stats)
-        link.configReceived.connect(self.device.load)
-        link.chordsReceived.connect(self.chords.load)
+        link.configReceived.connect(self._on_config)
+        link.chordsReceived.connect(self.chords.set_chords)
         link.lhmStatus.connect(self._on_lhm)
         link.flashStarted.connect(self._on_flash_started)
 
+    def _on_config(self, cfg):
+        self.display.load(cfg)
+        self.apps.load(cfg)
+        self.chords.load(cfg)
+        self.network.load(cfg)
+
     def _on_connected(self, port):
-        self.monitor.status.setText(f"Connected  ({port})")
-        self.monitor.status.setStyleSheet("font-weight: bold; color: #2e7d32;")
+        self.status.setText(f"Connected  ({port})")
+        self.status.setStyleSheet("font-weight: bold; padding: 8px 10px; color: #2e7d32;")
         self.tray.setToolTip(f"Buttonbox Companion — {port}")
 
     def _on_disconnected(self):
-        self.monitor.status.setText("Disconnected — searching for device…")
-        self.monitor.status.setStyleSheet("font-weight: bold; color: #c62828;")
+        self.status.setText("Disconnected — searching for device…")
+        self.status.setStyleSheet("font-weight: bold; padding: 8px 10px; color: #c62828;")
         self.tray.setToolTip("Buttonbox Companion — searching…")
 
     def _on_flash_started(self):
-        self.monitor.status.setText("Flashing — reconnecting automatically in ~35 s…")
-        self.monitor.status.setStyleSheet("font-weight: bold; color: #e65100;")
+        self.status.setText("Flashing — reconnecting automatically in ~35 s…")
+        self.status.setStyleSheet("font-weight: bold; padding: 8px 10px; color: #e65100;")
         self.tray.setToolTip("Buttonbox Companion — flashing…")
 
     def _on_lhm(self, ok, err):
@@ -523,8 +659,20 @@ def main():
         tray.hide()
         app.quit()
 
+    # Autostart is reachable from both the tray and the Device pane; keep the two
+    # controls in sync and write the registry once, from a single handler.
+    win.device.autostart.setChecked(is_autostart())
+
+    def apply_autostart(enabled):
+        set_autostart(enabled)
+        for w in (act_auto, win.device.autostart):
+            w.blockSignals(True)
+            w.setChecked(enabled)
+            w.blockSignals(False)
+
+    act_auto.toggled.connect(apply_autostart)
+    win.device.autostart.toggled.connect(apply_autostart)
     act_show.triggered.connect(lambda: (win.showNormal(), win.raise_(), win.activateWindow()))
-    act_auto.toggled.connect(set_autostart)
     act_flash.triggered.connect(link.flash)
     act_quit.triggered.connect(quit_app)
     tray.activated.connect(on_activated)
@@ -534,7 +682,7 @@ def main():
     saved_pw = secrets_store.get_secret("shelly_pass")
     if saved_pw:
         link.set_shelly_pass(saved_pw)
-        win.device.shelly_pass.setText(saved_pw)   # masked field (echo = Password)
+        win.network.shelly_pass.setText(saved_pw)   # masked field (echo = Password)
 
     tray.show()
     link.start()                    # starts minimized: window stays hidden
