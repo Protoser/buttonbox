@@ -905,6 +905,7 @@ static void drawWled() {
 // The ST7920 smears continuous motion, so instead of scrolling pixel-by-pixel we
 // hold the line still and jump a whole glyph each STEP_MS.
 static const uint32_t STEP_MS = 1000;
+static const uint32_t HOLD_MS = 5000;          // hold a freshly-changed title still, readable, before scrolling
 static void drawMusicLine(const char *s, int y, int left, int avail, uint32_t now) {
   if (!s[0]) return;
   int w = u8g2.getUTF8Width(s);
@@ -915,7 +916,11 @@ static void drawMusicLine(const char *s, int y, int left, int avail, uint32_t no
   int cw = u8g2.getMaxCharWidth();
   if (cw < 1) cw = 6;
   const int period = w + cw * 2;                 // 2-glyph gap before it repeats
-  int off = (int)((now / STEP_MS) % (period / cw)) * cw;
+  // Anchor the scroll to the last song change: hold at the start for HOLD_MS so the
+  // title is readable, then step one glyph per STEP_MS and loop.
+  uint32_t elapsed = now - music.titleAt;
+  int steps = (elapsed < HOLD_MS) ? 0 : (int)((elapsed - HOLD_MS) / STEP_MS);
+  int off = (steps % (period / cw)) * cw;
   u8g2.setClipWindow(left, y - 11, left + avail, y + 2);
   u8g2.drawUTF8(left - off, y, s);
   u8g2.drawUTF8(left - off + period, y, s);      // second copy = seamless wrap

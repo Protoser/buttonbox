@@ -16,6 +16,7 @@ struct MusicState {
   uint8_t  playState;        // 0 none, 1 playing, 2 paused
   char     title[64];
   uint32_t lastRx;           // millis() of last line (0 = never)
+  uint32_t titleAt;          // millis() when title last *changed* (0 = never)
 };
 extern MusicState music;
 
