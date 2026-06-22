@@ -68,10 +68,15 @@ static const uint16_t MENU_HOLD_MS = 400;
 static uint32_t menuHoldStart   = 0;
 static bool     menuHoldHandled = false;
 
-static bool     displayDirty = true;
-static uint32_t lastDraw     = 0;
-static uint32_t lastActivity = 0;
-static bool     blanked      = false;
+// Display state. The panel is rendered from a task on core 0 (see displayTask), so
+// the fields it shares with the core-1 input loop are volatile: core 1 only raises
+// these flags, the render task consumes them. lastDraw is touched by the task only.
+static volatile bool     displayDirty = true;
+static uint32_t          lastDraw     = 0;
+static volatile uint32_t lastActivity = 0;
+static volatile bool     blanked      = false;
+static volatile bool     orientDirty  = false;   // request: re-apply saved rotation on the render task
+static TaskHandle_t      displayTaskHandle = nullptr;
 
 // Nav-button legend glyphs (right... drawn at the left edge to match the buttons).
 enum HintKind : uint8_t { H_NONE, H_UP, H_DOWN, H_LEFT, H_RIGHT, H_PLAY, H_PAUSE, H_TEXT };
@@ -87,6 +92,7 @@ static void gotoPage(Page p);
 static void confirmCapture();
 static void handleNav(uint8_t a);
 static void render();
+static void displayTask(void *);
 static void drawLauncher();
 
 // ----------------------------------------------------------------------------
@@ -163,6 +169,8 @@ static bool appGrab = false;   // PAGE_APPORDER: true = the selected app is pick
 static void applyOrientation() { u8g2.setDisplayRotation(settings.flipped ? U8G2_R0 : U8G2_R2); }
 
 static void enterBootloader() {
+  // The render task owns the panel on core 0; stop it before we draw from core 1.
+  if (displayTaskHandle) vTaskSuspend(displayTaskHandle);
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_6x12_tr);
   u8g2.drawStr(0, 26, "Flash mode:");
@@ -223,7 +231,7 @@ static void handleNav(uint8_t a) {
       else if (a == NAV_DOWN) { if (sel < SETTINGS_COUNT - 1) sel++; }
       else if (a == NAV_BACK) { gotoPage(PAGE_MENU); return; }
       else switch (sel) {
-        case 0: settingsToggleFlip(); applyOrientation();                       break;
+        case 0: settingsToggleFlip(); orientDirty = true; displayDirty = true;  break;
         case 1: settingsToggleLabels();                                         break;
         case 2: settingsCycleIdle();                                            break;
         case 3: settingsCycleChordWin();                                        break;
@@ -1280,6 +1288,8 @@ void uiBegin() {
   uint8_t bs = (settings.bootSel > APP_COUNT) ? 0 : settings.bootSel;   // 0 = launcher, else app
   page = (bs == 0) ? PAGE_LAUNCHER : APPS[bs - 1].page;
   if (page != PAGE_LAUNCHER) { lastApp = page; lastAppSel = 0; }        // so menu btn resumes it
+  // Render on core 0 so the slow ST7920 flush never stalls the input loop (core 1).
+  xTaskCreatePinnedToCore(displayTask, "display", 8192, nullptr, 1, &displayTaskHandle, 0);
 }
 Page uiPage()  { return page; }
 
@@ -1299,7 +1309,7 @@ void    uiSetAppHidden(uint8_t mask) {
   if (page == PAGE_LAUNCHER || page == PAGE_APPORDER) displayDirty = true;
 }
 void uiNoteActivity(uint32_t now) { lastActivity = now; blanked = false; displayDirty = true; }
-void uiApplyOrientation() { applyOrientation(); }   // public hooks for the host link
+void uiApplyOrientation() { orientDirty = true; displayDirty = true; }   // host link: re-apply on render task
 void uiEnterFlash()       { enterBootloader(); }
 
 // Menu button = global home/switch key. Tap (short press, fires on release):
@@ -1396,7 +1406,13 @@ void uiHandleWledBright(uint32_t now) {
   }
 }
 
-void uiTickDisplay(uint32_t now) {
+// One pass of the display logic: idle-blank + heartbeat/dirty redraw. Runs only on
+// the core-0 render task, which is the sole owner of the panel at runtime. Core 1
+// merely raises displayDirty / orientDirty / blanked; this consumes them.
+static void displayService() {
+  uint32_t now = millis();
+  if (orientDirty) { orientDirty = false; applyOrientation(); displayDirty = true; }
+
   bool keepAwake = (page == PAGE_TIMER && swIsRunning()) ||
                    (page == PAGE_DASH && pcStatsFresh(now)) ||
                    (page == PAGE_MUSIC && musicFresh(now)) ||
@@ -1409,7 +1425,16 @@ void uiTickDisplay(uint32_t now) {
     u8g2.clearBuffer(); u8g2.sendBuffer(); blanked = true;
   }
   uint32_t heartbeat = keepAwake ? 100 : 200;
-  if (!blanked && (displayDirty || (now - lastDraw) > heartbeat)) {
-    render(); lastDraw = now; displayDirty = false;
+  bool dirty = displayDirty;
+  displayDirty = false;            // clear before drawing so a change mid-render re-marks it
+  if (!blanked && (dirty || (now - lastDraw) > heartbeat)) {
+    render(); lastDraw = now;
+  }
+}
+
+static void displayTask(void *) {
+  for (;;) {
+    displayService();
+    vTaskDelay(pdMS_TO_TICKS(5));   // ~200 Hz cap; render self-throttles via dirty/heartbeat
   }
 }

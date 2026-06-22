@@ -60,6 +60,6 @@ void loop() {
 
   if (uiPage() == PAGE_TIMER)   uiHandleTimerLap(now);
   uiHandleWledBright(now);         // self-gating; handles hold-to-scroll + release flush
-
-  uiTickDisplay(now);
+  // The display renders on its own task pinned to core 0 (started in uiBegin) so the
+  // slow ST7920 flush never blocks button sampling here on core 1.
 }
