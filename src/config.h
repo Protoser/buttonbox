@@ -37,4 +37,9 @@ static constexpr uint8_t NUM_HID    = NUM_ALWAYS + NUM_NAV;   // 14 (USB gamepad
 // Menu navigation actions, in NAV_BUTTON_PINS order.
 enum NavAction : uint8_t { NAV_UP = 0, NAV_DOWN = 1, NAV_SELECT = 2, NAV_BACK = 3 };
 
-static const uint16_t DEBOUNCE_MS = 5;
+// Lockout debounce window (see buttons.cpp): a press registers the instant the
+// contact closes, then any further edge is ignored for this long. So it both
+// catches a short click and collapses contact bounce / rapid retriggers into one
+// press. Set it a bit above the switch's worst-case bounce (~10-20 ms for cheap
+// tactile/arcade buttons). It's also the minimum gap between two distinct presses.
+static const uint16_t DEBOUNCE_MS = 50;

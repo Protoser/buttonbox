@@ -1,4 +1,5 @@
 #include "music.h"
+#include "hostlink.h"
 
 MusicState music = {0, {0}, 0, 0};
 
@@ -29,5 +30,5 @@ bool musicFresh(uint32_t now) {
 }
 
 void musicSendCmd(const char *cmd) {
-  Serial.printf("mctl %s\n", cmd);
+  char buf[24]; snprintf(buf, sizeof(buf), "mctl %s\n", cmd); hostlinkSend(buf);
 }

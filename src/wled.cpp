@@ -1,6 +1,7 @@
 #include "wled.h"
 #include "shelly.h"      // shellyCompanionMode(), shellyWifiOk() — shared WiFi lifecycle
 #include "settings.h"
+#include "hostlink.h"    // hostlinkSend() — bounded, non-blocking serial write
 #include <Preferences.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -148,14 +149,14 @@ void wledBegin() {
 }
 
 // Each action: serial request when the companion is driving, else queue a direct call.
-void wledPowerOn()  { if (shellyCompanionMode()) Serial.println("wledcmd on");  else notify(C_ON); }
-void wledPowerOff() { if (shellyCompanionMode()) Serial.println("wledcmd off"); else notify(C_OFF); }
-void wledPresetNext() { if (shellyCompanionMode()) Serial.println("wledcmd ps+"); else notify(C_PS_NEXT); }
-void wledPresetPrev() { if (shellyCompanionMode()) Serial.println("wledcmd ps-"); else notify(C_PS_PREV); }
+void wledPowerOn()  { if (shellyCompanionMode()) hostlinkSend("wledcmd on\n");  else notify(C_ON); }
+void wledPowerOff() { if (shellyCompanionMode()) hostlinkSend("wledcmd off\n"); else notify(C_OFF); }
+void wledPresetNext() { if (shellyCompanionMode()) hostlinkSend("wledcmd ps+\n"); else notify(C_PS_NEXT); }
+void wledPresetPrev() { if (shellyCompanionMode()) hostlinkSend("wledcmd ps-\n"); else notify(C_PS_PREV); }
 
 void wledSetBrightness(uint8_t bri) {
   if (shellyCompanionMode()) {
-    Serial.printf("wledcmd bri %u\n", bri);
+    char buf[20]; snprintf(buf, sizeof(buf), "wledcmd bri %u\n", bri); hostlinkSend(buf);
   } else {
     wledBriTarget = bri;
     notify(C_BRI_SET);

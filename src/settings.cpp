@@ -18,11 +18,16 @@ void loadSettings() {
   settings.bootSel = p.getUChar("boot", 1);
   { uint8_t def[5] = {0,1,2,3,4};
     if (p.getBytes("pcord", settings.pcStatOrder, 5) != 5) memcpy(settings.pcStatOrder, def, 5); }
-  { uint8_t adef[APP_ORDER_MAX] = {0,1,2,3,4,5,6,7};
+  { uint8_t adef[APP_ORDER_MAX] = {0,1,2,3,4,5,6,7,8};
     if (p.getBytes("aord", settings.appOrder, APP_ORDER_MAX) != APP_ORDER_MAX)
       memcpy(settings.appOrder, adef, APP_ORDER_MAX); }
-  settings.appHidden = p.getUChar("ahid", 0);
+  settings.appHidden = p.getUShort("ahid", 0);
   settings.wifiMode = p.getUChar("wmode", 2);
+  { uint8_t mdef[MCDU_MAP_N] = {3, 9, 4, 10, 5, 11, 6, 12, 7, 13, 1, 2, 17, 16};
+    if (p.getBytes("mcdumap", settings.mcduMap, MCDU_MAP_N) != MCDU_MAP_N)
+      memcpy(settings.mcduMap, mdef, MCDU_MAP_N); }
+  settings.flightUnits = p.getUChar("funits", 0);
+  settings.engStyle    = p.getUChar("engsty", 0);
   p.end();
 }
 
@@ -36,8 +41,11 @@ void saveSettings() {
   p.putUChar("boot", settings.bootSel);
   p.putBytes("pcord", settings.pcStatOrder, 5);
   p.putBytes("aord", settings.appOrder, APP_ORDER_MAX);
-  p.putUChar("ahid", settings.appHidden);
+  p.putUShort("ahid", settings.appHidden);
   p.putUChar("wmode", settings.wifiMode);
+  p.putBytes("mcdumap", settings.mcduMap, MCDU_MAP_N);
+  p.putUChar("funits", settings.flightUnits);
+  p.putUChar("engsty", settings.engStyle);
   p.end();
 }
 

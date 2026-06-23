@@ -6,7 +6,7 @@ enum Page : uint8_t {
   PAGE_LAUNCHER, PAGE_BUTTONS, PAGE_MENU, PAGE_SETTINGS, PAGE_BTNTEST, PAGE_TIMER,
   PAGE_LAPLIST, PAGE_CHORDS, PAGE_CHORD_CAPTURE, PAGE_CHORD_OUTPUT, PAGE_CHORD_EDIT,
   PAGE_DASH, PAGE_PCSTATS, PAGE_SHELLY, PAGE_MUSIC, PAGE_WLED, PAGE_APPORDER,
-  PAGE_BEAMNG
+  PAGE_BEAMNG, PAGE_FLIGHT, PAGE_MCDU, PAGE_MCDUMAP, PAGE_MCDUMAP_SET
 };
 
 void uiBegin();                       // display init + apply saved orientation
@@ -25,5 +25,5 @@ void uiHandleWledBright(uint32_t now); // WLED Bright focus: hold Up/Down to scr
 uint8_t uiAppCount();                  // number of launcher apps (APPS[])
 uint8_t uiGetAppOrder(uint8_t *out);   // writes the current clean order (>= uiAppCount() bytes), returns count
 void    uiSetAppOrder(const uint8_t *order, uint8_t n);  // apply order from companion, normalize + persist
-uint8_t uiGetAppHidden();              // bitmask of apps hidden from the launcher
-void    uiSetAppHidden(uint8_t mask);  // apply hidden mask from companion (Menu forced visible) + persist
+uint16_t uiGetAppHidden();              // bitmask of apps hidden from the launcher
+void     uiSetAppHidden(uint16_t mask); // apply hidden mask from companion (Menu forced visible) + persist

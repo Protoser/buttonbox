@@ -10,6 +10,8 @@
 #include "music.h"
 #include "wled.h"
 #include "beamng.h"
+#include "flight.h"
+#include "mcdu.h"
 #include "clock.h"
 #include "esp32-hal-tinyusb.h"   // usb_persist_restart()
 
@@ -27,6 +29,10 @@ static int8_t lastAppSel = 0;
 static uint8_t beamngView = 0;
 static const uint8_t BEAMNG_VIEWS = 4;   // OVERVIEW / DASH / STATUS / LIGHTS
 
+// Flight page: which sub-view is shown (cycled with Up/Down). See drawFlight().
+static uint8_t flightView = 0;
+static const uint8_t FLIGHT_VIEWS = 4;   // FLIGHT / A/P / CONFIG / ENGINE
+
 // WLED page: which control SELECT has focused (0=power, 1=brightness, 2=preset).
 static uint8_t wledFocus = 0;
 // Brightness hold-adjust: while a button is held the value scrolls locally and is
@@ -37,8 +43,8 @@ static uint32_t wledBriStepAt = 0;
 static const uint8_t  WLED_BRI_STEP      = 8;
 static const uint16_t WLED_BRI_REPEAT_MS = 70;
 
-static const char *MENU_ITEMS[]     = {"Button Test", "Chords", "Settings", "App Order", "Flash Mode", "Back"};
-static const uint8_t MENU_COUNT     = 6;
+static const char *MENU_ITEMS[]     = {"Button Test", "Chords", "Settings", "App Order", "MCDU Keys", "Flash Mode", "Back"};
+static const uint8_t MENU_COUNT     = 7;
 static const char *SETTINGS_ITEMS[] = {"Rotate", "Labels", "Idle", "Chord", "Boot", "WiFi", "Back"};
 static const uint8_t SETTINGS_COUNT = 7;
 static const char *PCSTAT_ITEMS[]   = {"CPU", "RAM", "GPU", "CPU Temp", "GPU Temp",
@@ -49,6 +55,9 @@ static const uint8_t PCSTAT_TOTAL    = PCSTAT_MAX_ON + 1;  // 5 slots + Back row
 
 static int8_t  testLastHid  = -1;
 static uint8_t testLastGpio = 0;
+
+// MCDU key map editor: which physical button (HID index) the output picker is editing.
+static uint8_t mcduEditBtn  = 0;
 
 // Chord editor scratch
 static uint32_t captureMask    = 0;
@@ -108,6 +117,8 @@ static void iconShelly(int cx, int cy);
 static void iconMusic(int cx, int cy);
 static void iconWled(int cx, int cy);
 static void iconBeamng(int cx, int cy);
+static void iconFlight(int cx, int cy);
+static void iconMcdu(int cx, int cy);
 
 struct App { const char *name; void (*drawIcon)(int cx, int cy); Page page; };
 // New apps append here so existing persisted app indices (appOrder/appHidden) stay valid.
@@ -120,6 +131,8 @@ static const App APPS[] = {
   {"Menu",    iconMenu,    PAGE_MENU},
   {"WLED",    iconWled,    PAGE_WLED},
   {"BeamNG",  iconBeamng,  PAGE_BEAMNG},
+  {"Flight",  iconFlight,  PAGE_FLIGHT},
+  {"MCDU",    iconMcdu,    PAGE_MCDU},
 };
 static const uint8_t APP_COUNT = sizeof(APPS) / sizeof(APPS[0]);
 
@@ -171,6 +184,8 @@ static void applyOrientation() { u8g2.setDisplayRotation(settings.flipped ? U8G2
 static void enterBootloader() {
   // The render task owns the panel on core 0; stop it before we draw from core 1.
   if (displayTaskHandle) vTaskSuspend(displayTaskHandle);
+  delay(50);                       // let an in-flight render finish so it can't overdraw us
+  u8g2.setMaxClipWindow();         // a clipped page (PFD/Music) may have left a clip active
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_6x12_tr);
   u8g2.drawStr(0, 26, "Flash mode:");
@@ -184,7 +199,7 @@ static void gotoPage(Page p) {
   if (page != PAGE_LAUNCHER && p == PAGE_LAUNCHER) { lastApp = page; lastAppSel = sel; }  // remember on minimize
   // Capture/Button-Test grab every button, so clear any HID currently held by
   // the engine on entry (other pages keep the non-nav buttons live).
-  if (p == PAGE_CHORD_CAPTURE || p == PAGE_BTNTEST) resetChordEngine();
+  if (p == PAGE_CHORD_CAPTURE || p == PAGE_BTNTEST || p == PAGE_MCDUMAP) resetChordEngine();
   if (p == PAGE_CHORD_CAPTURE) captureMask = 0;
   if (p == PAGE_BTNTEST)       testLastHid = -1;
   page = p; sel = 0; displayDirty = true;
@@ -221,8 +236,9 @@ static void handleNav(uint8_t a) {
         case 1: gotoPage(PAGE_CHORDS);   return;
         case 2: gotoPage(PAGE_SETTINGS); return;
         case 3: normalizeAppOrder(); appGrab = false; gotoPage(PAGE_APPORDER); return;
-        case 4: enterBootloader();       return;
-        case 5: gotoPage(PAGE_LAUNCHER); return;
+        case 4: gotoPage(PAGE_MCDUMAP);  return;
+        case 5: enterBootloader();       return;
+        case 6: gotoPage(PAGE_LAUNCHER); return;
       }
       break;
 
@@ -334,6 +350,14 @@ static void handleNav(uint8_t a) {
       else if (a == NAV_BACK)   { gotoPage(PAGE_LAUNCHER); return; }
       break;
 
+    case PAGE_FLIGHT:
+      // Up/Down (and Select) cycle the read-only instrument sub-views.
+      if      (a == NAV_UP)     flightView = (flightView + FLIGHT_VIEWS - 1) % FLIGHT_VIEWS;
+      else if (a == NAV_DOWN)   flightView = (flightView + 1) % FLIGHT_VIEWS;
+      else if (a == NAV_SELECT) flightView = (flightView + 1) % FLIGHT_VIEWS;
+      else if (a == NAV_BACK)   { gotoPage(PAGE_LAUNCHER); return; }
+      break;
+
     case PAGE_PCSTATS: {
       if      (a == NAV_UP)   { if (sel > 0) sel--; }
       else if (a == NAV_DOWN) { if (sel < PCSTAT_TOTAL - 1) sel++; }
@@ -382,6 +406,19 @@ static void handleNav(uint8_t a) {
         if (appGrab && sel < APP_COUNT - 1) {
           uint8_t t = settings.appOrder[sel]; settings.appOrder[sel] = settings.appOrder[sel + 1]; settings.appOrder[sel + 1] = t; sel++; saveSettings();
         } else if (sel < APP_COUNT - 1) sel++;
+      }
+      break;
+
+    // PAGE_MCDUMAP is a press-capture page (grabs every button in uiHandlePageInput),
+    // so it has no nav handling here.
+    case PAGE_MCDUMAP_SET:
+      // Pick this button's MCDU output from the full list; Select sets it, Back cancels.
+      if      (a == NAV_UP)     { if (sel > 0) sel--; }
+      else if (a == NAV_DOWN)   { if (sel < MCDU_OUTPUT_COUNT - 1) sel++; }
+      else if (a == NAV_BACK)   { gotoPage(PAGE_MCDUMAP); sel = mcduEditBtn; return; }
+      else if (a == NAV_SELECT) {
+        settings.mcduMap[mcduEditBtn] = (uint8_t)sel; saveSettings();
+        gotoPage(PAGE_MCDUMAP); sel = mcduEditBtn; return;
       }
       break;
 
@@ -680,6 +717,20 @@ static void iconBeamng(int cx, int cy) {             // round gauge with a needl
   u8g2.drawDisc(cx, cy, 1);                          // hub
 }
 
+static void iconFlight(int cx, int cy) {             // top-down airplane
+  u8g2.drawVLine(cx, cy - 8, 16);                    // fuselage
+  u8g2.drawHLine(cx - 8, cy - 1, 17);               // main wing
+  u8g2.drawHLine(cx - 3, cy + 6, 7);                // tailplane
+  u8g2.drawPixel(cx, cy - 8);                        // nose tip
+}
+
+static void iconMcdu(int cx, int cy) {               // MCDU: screen over a keypad
+  u8g2.drawFrame(cx - 8, cy - 9, 16, 8);             // screen
+  for (uint8_t r = 0; r < 3; r++)                    // 3x3 keypad of dots
+    for (uint8_t c = 0; c < 3; c++)
+      u8g2.drawPixel(cx - 4 + c * 4, cy + 2 + r * 3);
+}
+
 // App launcher: 3-column icon grid (right of the nav legend); selected cell
 // gets a frame. The left legend shows what the 4 nav buttons do here:
 // Up / Down move the highlight, Select (►) opens, Back (◄) resumes last app.
@@ -801,6 +852,46 @@ static void drawAppOrder() {
   NavHint hints[4] = {{H_UP, ""}, {H_DOWN, ""}, {H_TEXT, ""}, {H_LEFT, ""}};
   strncpy(hints[2].label, selLbl, 2); hints[2].label[2] = 0;
   drawNavLegend(hints);
+  u8g2.sendBuffer();
+}
+
+// Friendly name for a physical button: the 10 grid buttons are B1..B10, the 4 nav
+// buttons are UP/DOWN/ENTER/BACK (HID 10..13, in NavAction order).
+static const char *NAVBTN_NAMES[NUM_NAV] = {"UP", "DOWN", "ENTER", "BACK"};
+static void mcduBtnLabel(uint8_t i, char *buf, size_t n) {
+  if (i < NUM_ALWAYS)                 snprintf(buf, n, "B%u", i + 1);
+  else if (i - NUM_ALWAYS < NUM_NAV)  snprintf(buf, n, "%s", NAVBTN_NAMES[i - NUM_ALWAYS]);
+  else                                snprintf(buf, n, "?");
+}
+
+// MCDU button-remap editor (press-capture): press the physical button you want to
+// remap and the output picker opens for it. The menu/toggle button exits.
+static void drawMcduMap() {
+  drawListHeader("MCDU KEY");
+  u8g2.setFont(u8g2_font_6x12_tr);
+  u8g2.drawStr(cL() + 2, 34, "Press a button");
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(cL() + 2, 47, "to set what it does.");
+  u8g2.drawStr(cL() + 2, 60, "Menu button = exit");
+  u8g2.sendBuffer();
+}
+
+// Output picker submenu: choose the MCDU output for button mcduEditBtn.
+static void drawMcduMapSet() {
+  char bl[8]; mcduBtnLabel(mcduEditBtn, bl, sizeof(bl));
+  char hdr[14]; snprintf(hdr, sizeof(hdr), "SET %s", bl);
+  drawListHeader(hdr);
+  const uint8_t visible = 4;
+  uint8_t start = (sel >= visible) ? (sel - visible + 1) : 0;
+  u8g2.setFont(u8g2_font_6x12_tr);
+  for (uint8_t row = 0; row < visible && (start + row) < MCDU_OUTPUT_COUNT; row++) {
+    uint8_t idx = start + row;
+    uint8_t y = 16 + row * 12;
+    if (idx == sel) { u8g2.drawBox(cL(), y, 110, 12); u8g2.setDrawColor(0); }
+    u8g2.drawStr(cL() + 3, y + 10, mcduOutputLabel(idx));
+    u8g2.setDrawColor(1);
+  }
+  drawNavLegend(LIST_HINTS);
   u8g2.sendBuffer();
 }
 
@@ -1256,6 +1347,310 @@ static void drawBeamng() {
   u8g2.sendBuffer();
 }
 
+// ---- Flight (MSFS) telemetry sub-views ---------------------------------------
+
+// A vertical "rolling tape" (airspeed / altitude). axisX is the scale line;
+// leftTape=true puts ticks+labels to its left with the value box on the left and a
+// pointer poking right (toward the attitude); false mirrors it. Center shows value.
+static void drawVTape(int axisX, bool leftTape, int yT, int yB, long value,
+                      int step, float ppu, const char *readout) {
+  int cyT = (yT + yB) / 2;
+  u8g2.drawVLine(axisX, yT, yB - yT + 1);
+  u8g2.setFont(u8g2_font_4x6_tr);
+  long range = (long)((yB - yT) / 2 / ppu) + step;
+  long m0 = ((value - range) / step) * step;
+  for (long m = m0; m <= value + range; m += step) {
+    if (m < 0) continue;
+    int y = cyT - (int)roundf((m - value) * ppu);
+    if (y < yT + 2 || y > yB - 2) continue;
+    char lab[8]; snprintf(lab, sizeof(lab), "%ld", m);
+    if (leftTape) { u8g2.drawHLine(axisX - 3, y, 3); u8g2.drawStr(axisX - 5 - u8g2.getStrWidth(lab), y + 2, lab); }
+    else          { u8g2.drawHLine(axisX + 1, y, 3); u8g2.drawStr(axisX + 5, y + 2, lab); }
+  }
+  u8g2.setFont(u8g2_font_5x7_tr);                       // current-value box + pointer
+  int rw = u8g2.getStrWidth(readout) + 3, rh = 11, by = cyT - rh / 2;
+  int bx = leftTape ? (axisX - rw) : axisX;
+  u8g2.setDrawColor(0); u8g2.drawBox(bx, by, rw, rh); u8g2.setDrawColor(1);
+  u8g2.drawFrame(bx, by, rw, rh);
+  u8g2.drawStr(bx + 2, by + 8, readout);
+  if (leftTape) u8g2.drawTriangle(axisX, cyT - 3, axisX, cyT + 3, axisX + 3, cyT);
+  else          u8g2.drawTriangle(axisX, cyT - 3, axisX, cyT + 3, axisX - 3, cyT);
+}
+
+// Horizontal heading tape with a centered current-heading readout box.
+static void drawHdgTape(int x0, int x1, int yTop, int hdg) {
+  int cx = (x0 + x1) / 2, base = yTop + 8;
+  u8g2.drawHLine(x0, base, x1 - x0);
+  const float ppd = 1.2f;
+  for (int d = -40; d <= 40; d += 10) {                 // ticks; longer at 30deg marks
+    int tx = cx + (int)roundf(d * ppd);
+    if (tx < x0 || tx > x1) continue;
+    bool major = ((((hdg + d) % 30) + 30) % 30) == 0;
+    u8g2.drawVLine(tx, base - (major ? 4 : 2), major ? 4 : 2);
+  }
+  char b[6]; snprintf(b, sizeof(b), "%03d", hdg);
+  u8g2.setFont(u8g2_font_5x7_tr);
+  int rw = u8g2.getStrWidth(b) + 4, bx = cx - rw / 2;
+  u8g2.setDrawColor(0); u8g2.drawBox(bx, yTop, rw, 9); u8g2.setDrawColor(1);
+  u8g2.drawFrame(bx, yTop, rw, 9);
+  u8g2.drawStr(bx + 2, yTop + 7, b);
+}
+
+static void drawFlightCore() {                          // PFD: tapes + attitude + heading
+  int gx0 = cL(), gx1 = cR();
+  const int yT = 14, yB = 51;
+  int asAxis = gx0 + 20, altAxis = gx1 - 30;
+  int adiL = asAxis + 4, adiR = altAxis - 4;
+  int adiCx = (adiL + adiR) / 2, adiCy = (yT + yB) / 2;
+
+  // Attitude indicator with a pitch ladder. The aircraft symbol is fixed at the
+  // centre; the horizon (0deg) and the +/-10/20deg rungs slide with pitch and roll
+  // with bank. Clipped to the ADI box so it never spills into the tapes.
+  // Frames: along-axis = (c,-s) (the rung direction), down-axis = (s,c).
+  u8g2.setClipWindow(adiL, yT, adiR, yB);
+  const float ppd = 0.9f;                                // pixels per degree of pitch
+  float br = flight.bank * DEG_TO_RAD, c = cosf(br), s = sinf(br);
+  float hyc = adiCy + flight.pitch * ppd;                // horizon centre (the 0deg line)
+  static const int LADDER[] = {-20, -10, 0, 10, 20};
+  u8g2.setFont(u8g2_font_4x6_tr);
+  for (uint8_t i = 0; i < 5; i++) {
+    int th = LADDER[i];
+    float p = -th * ppd;                                 // perp offset from horizon (up = negative)
+    float rcx = adiCx + p * s, rcy = hyc + p * c;        // rung centre
+    int hw = (th == 0) ? (adiR - adiL) / 2 : 8;          // horizon spans the box; rungs are short
+    int x1 = (int)roundf(rcx - hw * c), y1 = (int)roundf(rcy + hw * s);
+    int x2 = (int)roundf(rcx + hw * c), y2 = (int)roundf(rcy - hw * s);
+    u8g2.drawLine(x1, y1, x2, y2);
+    if (th != 0) {                                       // degree label at the rung ends
+      char d[4]; snprintf(d, sizeof(d), "%d", th < 0 ? -th : th);
+      u8g2.drawStr(x2 + 1, y2 + 2, d);
+      u8g2.drawStr(x1 - 1 - u8g2.getStrWidth(d), y1 + 2, d);
+    }
+  }
+  u8g2.setMaxClipWindow();
+  int rr = (yB - yT) / 2 - 1;                            // bank pointer on the top arc
+  float pa = (-90.0f + flight.bank) * DEG_TO_RAD;
+  int bpx = adiCx + (int)(rr * cosf(pa)), bpy = adiCy + (int)(rr * sinf(pa));
+  u8g2.drawTriangle(bpx, bpy, bpx - 2, bpy - 3, bpx + 2, bpy - 3);
+  u8g2.drawHLine(adiCx - 8, adiCy, 5);                   // fixed aircraft symbol
+  u8g2.drawHLine(adiCx + 4, adiCy, 5);
+  u8g2.drawPixel(adiCx, adiCy);
+
+  char b[12];                                            // speed + altitude tapes (unit-aware)
+  bool mph = settings.flightUnits & FU_SPEED_MPH, altM = settings.flightUnits & FU_ALT_M;
+  long iasV = mph ? lroundf(flight.ias * 1.15078f) : (long)flight.ias;
+  long altV = altM ? lroundf(flight.alt * 0.3048f) : (long)flight.alt;
+  snprintf(b, sizeof(b), "%ld", iasV);
+  drawVTape(asAxis, true, yT, yB, iasV, 20, 0.5f, b);
+  snprintf(b, sizeof(b), "%ld", altV);
+  drawVTape(altAxis, false, yT, yB, altV, altM ? 50 : 200, altM ? 0.16f : 0.05f, b);
+
+  drawHdgTape(gx0, gx1 - 26, 53, flight.hdg);            // heading tape (bottom)
+  snprintf(b, sizeof(b), "%+d", flight.vs);              // VS readout in its own corner
+  u8g2.setFont(u8g2_font_4x6_tr);
+  u8g2.drawStr(gx1 - 24, 58, "VS");
+  u8g2.drawStr(gx1 - 24, 63, b);
+}
+
+// Annunciator chip: filled (inverse text) when active, outline when not.
+static void drawChip(int x, int y, int w, int h, const char *label, bool active) {
+  if (active) { u8g2.drawBox(x, y, w, h); u8g2.setDrawColor(0); }
+  else          u8g2.drawFrame(x, y, w, h);
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(x + (w - u8g2.getStrWidth(label)) / 2, y + (h + 7) / 2 - 1, label);
+  u8g2.setDrawColor(1);
+}
+
+static void drawFlightAp() {                            // FMA mode strip + FCU windows
+  int gx0 = cL(), gx1 = cR(), w = gx1 - gx0;
+  const char *fl[5] = {"AP", "HDG", "ALT", "NAV", "APR"};
+  bool on[5] = { (bool)flight.apMaster, (bool)(flight.apModes & AP_HDG),
+                 (bool)(flight.apModes & AP_ALT), (bool)(flight.apModes & AP_NAV),
+                 (bool)(flight.apModes & AP_APR) };
+  int cw = (w - 4) / 5;                                  // FMA annunciator row
+  for (int i = 0; i < 5; i++) drawChip(gx0 + i * (cw + 1), 14, cw, 11, fl[i], on[i]);
+
+  const int w1 = 40, by = 28, bh = 28;                   // HDG | ALT selected windows
+  int w2 = w - w1 - 3, ax = gx0 + w1 + 3;
+  char v[12];
+  u8g2.drawFrame(gx0, by, w1, bh);
+  u8g2.setFont(u8g2_font_5x7_tr); u8g2.drawStr(gx0 + 3, by + 8, "HDG");
+  snprintf(v, sizeof(v), "%03u", flight.apHdgSel);
+  u8g2.setFont(u8g2_font_10x20_tr);
+  u8g2.drawStr(gx0 + (w1 - u8g2.getStrWidth(v)) / 2, by + bh - 4, v);
+
+  u8g2.drawFrame(ax, by, w2, bh);
+  u8g2.setFont(u8g2_font_5x7_tr); u8g2.drawStr(ax + 3, by + 8, "ALT");
+  snprintf(v, sizeof(v), "%ld", (long)flight.apAltSel);
+  u8g2.setFont(u8g2_font_10x20_tr);
+  if (u8g2.getStrWidth(v) > w2 - 4) u8g2.setFont(u8g2_font_6x12_tr);   // 6-digit fallback
+  u8g2.drawStr(ax + (w2 - u8g2.getStrWidth(v)) / 2, by + bh - 4, v);
+}
+
+// Landing-gear indicator: solid = down & locked, hollow = up, crossed = in transit.
+static void drawGear(int cx, int cy, uint8_t pct) {
+  if (pct >= 100)    { u8g2.drawDisc(cx, cy, 3); u8g2.drawVLine(cx, cy - 6, 3); }
+  else if (pct == 0)   u8g2.drawCircle(cx, cy, 3);
+  else               { u8g2.drawCircle(cx, cy, 3); u8g2.drawLine(cx - 2, cy - 2, cx + 2, cy + 2); }
+}
+
+static void drawFlightConfig() {                        // gear diagram + flaps/splr/brake
+  int gx0 = cL(), gx1 = cR(), mid = gx0 + 44;
+  char b[12];
+  // Gear cluster (left), drawn in an aircraft layout: nose + two mains.
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(gx0, 21, "GEAR");
+  int gcx = gx0 + 20;
+  drawGear(gcx, 32, flight.gearPct);
+  drawGear(gcx - 12, 48, flight.gearPct);
+  drawGear(gcx + 12, 48, flight.gearPct);
+  const char *gs = flight.gearPct >= 100 ? "DOWN" : flight.gearPct == 0 ? "UP" : "TRANS";
+  u8g2.drawStr(gcx - u8g2.getStrWidth(gs) / 2, 62, gs);
+  // Flaps / spoilers bars + parking-brake annunciator (right).
+  int rx = mid, rw = gx1 - mid;
+  snprintf(b, sizeof(b), "FLAP %u%%", flight.flapsPct); drawValueBar(rx, 16, rw, 11, flight.flapsPct, 0, 100, b);
+  snprintf(b, sizeof(b), "SPLR %u%%", flight.spoilers); drawValueBar(rx, 30, rw, 11, flight.spoilers, 0, 100, b);
+  drawChip(rx, 45, rw, 13, flight.parkBrake ? "PARK BRK" : "P BRK OFF", flight.parkBrake);
+}
+
+// Round dial gauge: 240deg scale (lower-left -> top -> lower-right) with ticks, a
+// needle for `val`, the label above and the numeric readout below.
+static void drawDial(int cx, int cy, int r, long val, long vmin, long vmax,
+                     const char *label, const char *valTxt) {
+  const float A0 = 210.0f * DEG_TO_RAD, SW = 240.0f * DEG_TO_RAD;
+  u8g2.drawCircle(cx, cy, r);
+  for (uint8_t i = 0; i <= 4; i++) {
+    float a = A0 - SW * i / 4.0f, ca = cosf(a), sa = sinf(a);
+    u8g2.drawLine(cx + (int)((r - 3) * ca), cy - (int)((r - 3) * sa),
+                  cx + (int)(r * ca),       cy - (int)(r * sa));
+  }
+  float frac = (vmax > vmin) ? (float)(constrain(val, vmin, vmax) - vmin) / (float)(vmax - vmin) : 0.0f;
+  float a = A0 - SW * frac;
+  u8g2.drawLine(cx, cy, cx + (int)((r - 2) * cosf(a)), cy - (int)((r - 2) * sinf(a)));
+  u8g2.drawDisc(cx, cy, 1);
+  u8g2.setFont(u8g2_font_4x6_tr);
+  u8g2.drawStr(cx - u8g2.getStrWidth(label) / 2, cy - r - 1, label);
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(cx - u8g2.getStrWidth(valTxt) / 2, cy + r + 7, valTxt);
+}
+
+// Vertical EICAS-style bar: label above, fill from the bottom, value below.
+static void drawVBar(int x, int y, int w, int h, float frac, const char *label, const char *val) {
+  u8g2.setFont(u8g2_font_4x6_tr);
+  u8g2.drawStr(x + (w - u8g2.getStrWidth(label)) / 2, y - 1, label);
+  u8g2.drawFrame(x, y, w, h);
+  int fill = (int)(frac * (h - 2));
+  if (fill < 0) fill = 0; else if (fill > h - 2) fill = h - 2;
+  if (fill) u8g2.drawBox(x + 1, y + h - 1 - fill, w - 2, fill);
+  u8g2.drawStr(x + (w - u8g2.getStrWidth(val)) / 2, y + h + 6, val);
+}
+
+// Engine view: one gauge per engine (settings.engStyle: 0 dials, 1 EICAS bars), N
+// from flight.nEng. Throttle + fuel shown alongside. RPM/N1 per flight.engType.
+static void drawFlightEngine() {
+  int gx0 = cL(), gx1 = cR(), w = gx1 - gx0;
+  bool jet = (flight.engType == 1);
+  uint16_t ev[4] = {flight.engPrimary, flight.eng2, flight.eng3, flight.eng4};
+  uint8_t n = flight.nEng < 1 ? 1 : flight.nEng > 4 ? 4 : flight.nEng;
+  long emax = jet ? 110 : 3000;                          // N1 % (x1) or RPM
+  char b[10];
+
+  if (settings.engStyle == 0) {                          // ---- dial gauges + THR/FUEL bars ----
+    u8g2.setFont(u8g2_font_4x6_tr);
+    u8g2.drawStr(gx0, 12, jet ? "N1" : "RPM");
+    for (uint8_t k = 0; k < n; k++) {
+      long pv = jet ? ev[k] / 10 : ev[k];
+      int r = n >= 4 ? 8 : n == 3 ? 10 : n == 2 ? 13 : 15;
+      int cx = gx0 + (2 * k + 1) * w / (2 * n);
+      char lab[4]; snprintf(lab, sizeof(lab), "E%u", k + 1);
+      if (jet) snprintf(b, sizeof(b), "%u.%u", ev[k] / 10, ev[k] % 10);
+      else     snprintf(b, sizeof(b), "%u", ev[k]);
+      drawDial(cx, 30, r, pv, 0, emax, lab, b);
+    }
+    snprintf(b, sizeof(b), "THR %u%%", flight.throttle); drawValueBar(gx0 + 2, 50, w - 4, 6, flight.throttle, 0, 100, b);
+    snprintf(b, sizeof(b), "FUEL %u%%", flight.fuelPct); drawValueBar(gx0 + 2, 57, w - 4, 6, flight.fuelPct, 0, 100, b);
+  } else {                                               // ---- EICAS vertical bars ----
+    uint8_t cols = n + 2;                                // engines + THR + FUEL
+    int bw = (w - 2) / cols;
+    for (uint8_t k = 0; k < cols; k++) {
+      int x = gx0 + 1 + k * bw;
+      float frac; char lab[4];
+      if (k < n) {
+        long pv = jet ? ev[k] / 10 : ev[k];
+        frac = emax ? (float)pv / emax : 0.0f;
+        snprintf(lab, sizeof(lab), "%u", k + 1);
+        snprintf(b, sizeof(b), "%ld", pv);
+      } else if (k == n) {
+        frac = flight.throttle / 100.0f; snprintf(lab, sizeof(lab), "TH");
+        snprintf(b, sizeof(b), "%u", flight.throttle);
+      } else {
+        frac = flight.fuelPct / 100.0f; snprintf(lab, sizeof(lab), "FU");
+        snprintf(b, sizeof(b), "%u", flight.fuelPct);
+      }
+      drawVBar(x, 20, bw - 2, 30, frac, lab, b);
+    }
+  }
+}
+
+static void drawFlight() {
+  uint32_t now = millis();
+  static const char *VIEW_NAMES[FLIGHT_VIEWS] = {"PFD", "A/P", "CONFIG", "ENGINE"};
+  drawListHeader("FLIGHT");
+  u8g2.setFont(u8g2_font_5x7_tr);
+  const char *vn = VIEW_NAMES[flightView % FLIGHT_VIEWS];
+  u8g2.drawStr(126 - u8g2.getStrWidth(vn), 9, vn);    // view tag, right of the header
+
+  NavHint h[4] = {{H_UP, ""}, {H_DOWN, ""}, {H_NONE, ""}, {H_LEFT, ""}};
+  int icx = (cL() + cR()) / 2;
+
+  if (!flightFresh(now)) {                             // no companion / serial link
+    drawBeamngNoPc(icx, 36);
+    drawNavLegend(h);
+    u8g2.sendBuffer();
+    return;
+  }
+  if (!flight.active) {                                // companion up, MSFS not running
+    iconFlight(icx, 36);
+    drawNavLegend(h);
+    u8g2.sendBuffer();
+    return;
+  }
+
+  switch (flightView) {
+    case 0: drawFlightCore();   break;
+    case 1: drawFlightAp();     break;
+    case 2: drawFlightConfig(); break;
+    case 3: drawFlightEngine(); break;
+  }
+  drawNavLegend(h);
+  u8g2.sendBuffer();
+}
+
+// ---- MCDU (FlyByWire) full-screen mirror --------------------------------------
+// No header/legend: every button is repurposed as an MCDU key, so the whole panel
+// is the screen. Title pinned at the top row, scratchpad pinned at the bottom, the
+// 12 body rows scrolled in an MCDU_BODY_VIS-tall window. Font is 5x7 (24*5=120px).
+static void drawMcdu() {
+  uint32_t now = millis();
+  u8g2.clearBuffer();
+  if (!mcduFresh(now)) {
+    u8g2.setFont(u8g2_font_6x12_tr);
+    u8g2.drawStr(6, 36, "Waiting for MCDU...");
+    u8g2.sendBuffer();
+    return;
+  }
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(0, 7, mcdu.rows[0]);                       // title (row 0), pinned top
+  int start = 1 + mcdu.scrollOff;                         // first body row shown
+  for (uint8_t v = 0; v < MCDU_BODY_VIS; v++) {
+    uint8_t row = start + v;
+    if (row > MCDU_BODY) break;
+    u8g2.drawStr(0, 15 + v * 8, mcdu.rows[row]);
+  }
+  u8g2.drawStr(0, 63, mcdu.rows[MCDU_ROWS - 1]);          // scratchpad (row 13), pinned bottom
+  u8g2.sendBuffer();
+}
+
 static void render() {
   switch (page) {
     case PAGE_LAUNCHER:      drawLauncher();                                             break;
@@ -1272,10 +1667,14 @@ static void render() {
     case PAGE_DASH:          drawDash();                                                 break;
     case PAGE_PCSTATS:       drawPcStatsCfg();                                           break;
     case PAGE_APPORDER:      drawAppOrder();                                             break;
+    case PAGE_MCDUMAP:       drawMcduMap();                                              break;
+    case PAGE_MCDUMAP_SET:   drawMcduMapSet();                                           break;
     case PAGE_SHELLY:        drawShelly();                                               break;
     case PAGE_MUSIC:         drawMusic();                                                break;
     case PAGE_WLED:          drawWled();                                                 break;
     case PAGE_BEAMNG:        drawBeamng();                                               break;
+    case PAGE_FLIGHT:        drawFlight();                                               break;
+    case PAGE_MCDU:          drawMcdu();                                                 break;
   }
 }
 
@@ -1301,8 +1700,8 @@ void    uiSetAppOrder(const uint8_t *order, uint8_t n) {
   saveSettings();
   if (page == PAGE_LAUNCHER || page == PAGE_APPORDER) displayDirty = true;
 }
-uint8_t uiGetAppHidden() { return settings.appHidden; }
-void    uiSetAppHidden(uint8_t mask) {
+uint16_t uiGetAppHidden() { return settings.appHidden; }
+void     uiSetAppHidden(uint16_t mask) {
   for (uint8_t i = 0; i < APP_COUNT; i++) if (appIsMenu(i)) mask &= ~(1u << i);   // Menu stays visible
   settings.appHidden = mask;
   saveSettings();
@@ -1341,7 +1740,11 @@ void uiHandlePageInput() {
   // Capture/Button-Test need every button for the page; other UI pages only need
   // the nav buttons, leaving the non-nav buttons live as HID (handled by the
   // chord engine). A "claimed" button is suppressed so it doesn't also send HID.
-  bool grabAll = (page == PAGE_CHORD_CAPTURE || page == PAGE_BTNTEST);
+  // MCDU repurposes EVERY button as an MCDU key (forwarded raw to the companion),
+  // so it grabs all of them too; the menu/toggle button stays the exit.
+  // PAGE_MCDUMAP captures a button press to pick which one to remap, so it grabs all too.
+  bool grabAll = (page == PAGE_CHORD_CAPTURE || page == PAGE_BTNTEST || page == PAGE_MCDU ||
+                  page == PAGE_MCDUMAP);
   for (uint8_t i = 0; i < NUM_HID; i++) {
     if (!pressedEdge(physBtn(i))) continue;
     bool isNav = (i >= NUM_ALWAYS);
@@ -1349,6 +1752,10 @@ void uiHandlePageInput() {
     uiSuppressedMask |= (1u << i);
     if (page == PAGE_CHORD_CAPTURE)   { captureMask ^= (1u << i); displayDirty = true; }
     else if (page == PAGE_BTNTEST)    { testLastHid = i; testLastGpio = hidGpio(i); displayDirty = true; }
+    else if (page == PAGE_MCDU)       { mcduHandleButton(i); displayDirty = true; }   // map -> scroll/key
+    else if (page == PAGE_MCDUMAP)    {                       // press a button -> pick its output
+      mcduEditBtn = i; gotoPage(PAGE_MCDUMAP_SET); sel = settings.mcduMap[i]; return;
+    }
     else if (isNav) {
       uint8_t ni = i - NUM_ALWAYS;
       ni = (NUM_NAV - 1) - ni;
@@ -1417,6 +1824,8 @@ static void displayService() {
                    (page == PAGE_DASH && pcStatsFresh(now)) ||
                    (page == PAGE_MUSIC && musicFresh(now)) ||
                    (page == PAGE_BEAMNG && beamngFresh(now)) ||
+                   (page == PAGE_FLIGHT && flightFresh(now)) ||
+                   (page == PAGE_MCDU && mcduFresh(now)) ||
                    ((page == PAGE_SHELLY || page == PAGE_WLED) &&
                     settings.wifiMode != WIFI_MODE_OFF &&
                     (shellyWifiOk() || shellyCompanionMode()));

@@ -11,16 +11,21 @@ Run:   python app.py        (or pythonw app.py for no console)
 import os
 import sys
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPalette, QPixmap
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPalette, QPixmap
+from PySide6.QtWebSockets import QWebSocket
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFormLayout, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
-    QProgressBar, QPushButton, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QScrollArea, QStackedWidget, QSystemTrayIcon, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
+import mcdu as mcdu_mod
 import secrets_store
 from link import DeviceLink
+
+MCDU_WS_URL = "ws://localhost:8380/interfaces/v1/mcdu"   # FlyByWire SimBridge remote MCDU
 
 # ---- constants mirrored from the firmware (config.h / settings) ----
 NUM_HID = 14            # physical buttons, shown 1..14
@@ -29,8 +34,8 @@ MAX_CHORDS = 18
 IDLE_OPTS  = [(0, "Off"), (30, "30 s"), (120, "2 min")]
 CHORD_OPTS = [30, 40, 60, 80]
 BOOT_OPTS  = [(0, "Apps launcher"), (1, "Buttons"), (2, "Timer"), (3, "PC"), (4, "Shelly"),
-              (5, "Music"), (6, "Menu"), (7, "WLED"), (8, "BeamNG")]
-APP_NAMES  = ["Buttons", "Timer", "PC", "Shelly", "Music", "Menu", "WLED", "BeamNG"]  # mirror ui.cpp APPS index order
+              (5, "Music"), (6, "Menu"), (7, "WLED"), (8, "BeamNG"), (9, "Flight"), (10, "MCDU")]
+APP_NAMES  = ["Buttons", "Timer", "PC", "Shelly", "Music", "Menu", "WLED", "BeamNG", "Flight", "MCDU"]  # mirror ui.cpp APPS index order
 MENU_APP   = APP_NAMES.index("Menu")   # never hideable
 PCSTAT_BITS = [("CPU", 0), ("RAM", 1), ("GPU", 2), ("CPU Temp", 3), ("GPU Temp", 4),
                ("VRAM", 5), ("CPU Power", 6), ("GPU Power", 7)]
@@ -522,6 +527,238 @@ class DevicePane(QWidget):
 
 
 # ---------------------------------------------------------------- window -------
+class McduPane(QWidget):
+    """FlyByWire MCDU: mirrors SimBridge's MCDU to the box and drives it.
+
+    Owns a QWebSocket to SimBridge (event-driven, GUI thread). Incoming screen
+    frames are flattened (mcdu.parse_update) and pushed to the box via link.set_mcdu().
+    The box owns the button->output map (settings.mcduMap, editable here and on the
+    device); it applies the map itself and reports key outputs as link.mcduKey, which
+    we translate to events. A clickable faceplate plus physical-keyboard capture
+    (while focused) send keys too. All paths end at `event:left:<NAME>`.
+    """
+
+    _KEY_LABEL = {"DIV": "/", "SP": "SP", "DOT": ".", "PLUSMINUS": "+/-"}
+    # Physical buttons in device layout order: 5 rows x 2 grid (HID 0..9), then the
+    # 4 nav keys (10..13). Label "B<n>" matches the on-device editor's numbering.
+    _BTN_LABELS = [(f"B{i + 1}", i) for i in range(10)] + \
+                  [("UP", 10), ("DOWN", 11), ("ENTER", 12), ("BACK", 13)]
+    _SPECIAL_KEYS = {Qt.Key_Backspace: "CLR", Qt.Key_Delete: "CLR", Qt.Key_Left: "LEFT",
+                     Qt.Key_Right: "RIGHT", Qt.Key_Up: "UP", Qt.Key_Down: "DOWN"}
+
+    def __init__(self, link):
+        super().__init__()
+        self.link = link
+        self._ws_connected = False
+        self._loading = False           # guard so loading the device map doesn't echo a set
+        self.setFocusPolicy(Qt.StrongFocus)
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(pane_title("Flight Computer (MCDU)"))
+        self.status_lbl = QLabel("MCDU: connecting…")
+        self.status_lbl.setStyleSheet("color: #888;")
+        lay.addWidget(self.status_lbl)
+
+        tabs = QTabWidget()
+        tabs.addTab(self._build_mcdu_tab(), "MCDU")
+        tabs.addTab(self._build_remap_tab(), "Button map")
+        lay.addWidget(tabs, 1)
+
+        # WebSocket to SimBridge, with auto-reconnect.
+        self.ws = QWebSocket()
+        self.ws.connected.connect(self._on_ws_connected)
+        self.ws.disconnected.connect(self._on_ws_disconnected)
+        self.ws.textMessageReceived.connect(self._on_ws_message)
+        err_sig = getattr(self.ws, "errorOccurred", None) or getattr(self.ws, "error", None)
+        if err_sig is not None:
+            err_sig.connect(lambda *_: self._schedule_reconnect())
+        self._reconnect = QTimer(self)
+        self._reconnect.setSingleShot(True)
+        self._reconnect.setInterval(3000)
+        self._reconnect.timeout.connect(self._connect_ws)
+        link.mcduKey.connect(self.on_box_key)
+        self._connect_ws()
+
+    # ---- UI builders --------------------------------------------------------
+    def _build_mcdu_tab(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        # On-PC mirror of the box screen.
+        self.screen = QLabel("\n" * 13)
+        mono = QFont("Consolas"); mono.setStyleHint(QFont.StyleHint.Monospace); mono.setPointSize(10)
+        self.screen.setFont(mono)
+        self.screen.setStyleSheet("background:#0a1f12; color:#7CFC00; padding:6px;")
+        self.screen.setTextInteractionFlags(Qt.NoTextInteraction)
+        v.addWidget(self.screen)
+
+        hint = QLabel("Click keys, or focus this pane and type (letters/digits, "
+                      "space, / . + −, Backspace = CLR, arrows = slew).")
+        hint.setWordWrap(True); hint.setStyleSheet("color:#888;")
+        v.addWidget(hint)
+
+        face = QWidget()
+        fl = QVBoxLayout(face); fl.setContentsMargins(0, 0, 0, 0)
+        fl.addLayout(self._key_row(mcdu_mod.LSK_LEFT + mcdu_mod.LSK_RIGHT))
+        fl.addLayout(self._key_grid(mcdu_mod.FUNCTION, 6))
+        fl.addLayout(self._key_row(mcdu_mod.SLEW + mcdu_mod.EDIT))
+        fl.addLayout(self._key_grid(mcdu_mod.LETTERS, 7))
+        fl.addLayout(self._key_row(mcdu_mod.DIGITS))
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(face)
+        scroll.setFrameShape(QFrame.NoFrame)
+        v.addWidget(scroll, 1)
+        return w
+
+    def _key_button(self, name):
+        btn = QPushButton(self._KEY_LABEL.get(name, name))
+        btn.setFocusPolicy(Qt.NoFocus)          # keep keyboard focus on the pane
+        btn.setFixedHeight(26)
+        btn.clicked.connect(lambda _=False, n=name: self._send_key(n))
+        return btn
+
+    def _key_row(self, names):
+        row = QHBoxLayout()
+        for n in names:
+            row.addWidget(self._key_button(n))
+        return row
+
+    def _key_grid(self, names, cols):
+        grid = QGridLayout()
+        for i, n in enumerate(names):
+            grid.addWidget(self._key_button(n), i // cols, i % cols)
+        return grid
+
+    def _build_remap_tab(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.addWidget(QLabel("Map each device button (while the MCDU app is open) to an "
+                           "MCDU output. Saved on the box; the menu/toggle button always "
+                           "exits to the launcher. Also editable on the box: Menu → MCDU Keys."))
+        grid = QGridLayout()
+        self._combos = {}
+        for slot, (label, idx) in enumerate(self._BTN_LABELS):
+            combo = QComboBox()
+            combo.setFocusPolicy(Qt.StrongFocus)
+            for out_idx, (out_label, _ev) in enumerate(mcdu_mod.MCDU_OUTPUTS):
+                combo.addItem(out_label, out_idx)
+            combo.currentIndexChanged.connect(lambda *_: self._send_map())
+            r, c = slot // 2, (slot % 2) * 2
+            grid.addWidget(QLabel(label), r, c)
+            grid.addWidget(combo, r, c + 1)
+            self._combos[idx] = combo
+        v.addLayout(grid)
+        v.addStretch(1)
+        return w
+
+    # ---- map sync (device setting) -----------------------------------------
+    def load(self, cfg):
+        """Populate the remap dropdowns from the device's cfg (called on connect)."""
+        m = cfg.get("mcdumap")
+        if not m:
+            return
+        self._loading = True
+        for idx, combo in self._combos.items():
+            if idx < len(m):
+                combo.setCurrentIndex(max(0, combo.findData(m[idx])))
+        self._loading = False
+
+    def _send_map(self):
+        if self._loading:
+            return
+        out = [str(self._combos[i].currentData() or 0) for i in range(len(self._BTN_LABELS))]
+        self.link.set_setting("mcdumap", ",".join(out))
+
+    # ---- WebSocket ----------------------------------------------------------
+    def _connect_ws(self):
+        if not self._ws_connected:
+            self.ws.open(QUrl(MCDU_WS_URL))
+
+    def _schedule_reconnect(self):
+        if not self._ws_connected and not self._reconnect.isActive():
+            self._reconnect.start()
+
+    def _on_ws_connected(self):
+        self._ws_connected = True
+        self.status_lbl.setText("MCDU: connected to SimBridge")
+        self.link.set_mcdu(True, None)
+
+    def _on_ws_disconnected(self):
+        self._ws_connected = False
+        self.status_lbl.setText("MCDU: SimBridge not found — is it running with an FBW aircraft? (retrying)")
+        self.link.set_mcdu(False, None)
+        self._schedule_reconnect()
+
+    def _on_ws_message(self, message):
+        out = mcdu_mod.parse_update(message)
+        if out is None:
+            return
+        self.link.set_mcdu(True, out["rows"])
+        self.screen.setText("\n".join(out["rows"]))
+
+    def _send_key(self, name):
+        if self._ws_connected and name in mcdu_mod.KEY_EVENTS:
+            self.ws.sendTextMessage(f"event:left:{name}")
+
+    # ---- box buttons + keyboard --------------------------------------------
+    def on_box_key(self, out_idx):
+        # The box already applied its map (and handles scroll locally); it only sends
+        # real MCDU key outputs as 'mcdukey <out_idx>'. Translate and forward.
+        ev = mcdu_mod.output_event(out_idx)
+        if ev:
+            self._send_key(ev)
+
+    def keyPressEvent(self, e):
+        name = mcdu_mod.KEYBOARD_CHAR_MAP.get(e.text()) or self._SPECIAL_KEYS.get(e.key())
+        if name:
+            self._send_key(name)
+            e.accept()
+        else:
+            super().keyPressEvent(e)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.setFocus()
+
+
+class FlightPane(SettingsPane):
+    """Flight-app utility settings: display units and the engine gauge style. Engine
+    count follows the aircraft automatically (reported by SimConnect)."""
+
+    def __init__(self, link):
+        super().__init__(link)
+        lay = QVBoxLayout(self)
+        lay.addWidget(pane_title("Flight"))
+        form = QFormLayout()
+        self.speed = QComboBox(); self.speed.addItem("Knots", 0); self.speed.addItem("MPH", 1)
+        self.alt = QComboBox(); self.alt.addItem("Feet", 0); self.alt.addItem("Metres", 1)
+        self.eng = QComboBox(); self.eng.addItem("Dial gauges", 0); self.eng.addItem("EICAS bars", 1)
+        for c in (self.speed, self.alt, self.eng):
+            c.currentIndexChanged.connect(self._apply)
+        form.addRow("Airspeed units", self.speed)
+        form.addRow("Altitude units", self.alt)
+        form.addRow("Engine gauges", self.eng)
+        lay.addLayout(form)
+        note = QLabel("Engine count (1–4) follows the aircraft automatically.")
+        note.setStyleSheet("color: #888;"); note.setWordWrap(True)
+        lay.addWidget(note)
+        lay.addStretch(1)
+
+    def _apply(self, *_):
+        if self._loading:
+            return
+        funits = (1 if self.speed.currentData() else 0) | (2 if self.alt.currentData() else 0)
+        self.link.set_setting("funits", funits)
+        self.link.set_setting("engsty", self.eng.currentData())
+
+    def load(self, cfg):
+        self._loading = True
+        if "funits" in cfg:
+            self.speed.setCurrentIndex(1 if cfg["funits"] & 1 else 0)
+            self.alt.setCurrentIndex(1 if cfg["funits"] & 2 else 0)
+        if "engsty" in cfg:
+            self.eng.setCurrentIndex(1 if cfg["engsty"] else 0)
+        self._loading = False
+
+
 class MainWindow(QMainWindow):
     def __init__(self, link, tray):
         super().__init__()
@@ -537,8 +774,11 @@ class MainWindow(QMainWindow):
         self.chords = ChordsPane(link)
         self.network = NetworkPane(link)
         self.device = DevicePane(link)
+        self.flight = FlightPane(link)
+        self.mcdu = McduPane(link)
         panes = [("Monitor", self.monitor), ("Display", self.display), ("Apps", self.apps),
-                 ("Chords", self.chords), ("Network", self.network), ("Device", self.device)]
+                 ("Chords", self.chords), ("Flight", self.flight), ("MCDU", self.mcdu),
+                 ("Network", self.network), ("Device", self.device)]
 
         self.nav = QListWidget()
         self.nav.setFixedWidth(132)
@@ -592,6 +832,8 @@ class MainWindow(QMainWindow):
         self.apps.load(cfg)
         self.chords.load(cfg)
         self.network.load(cfg)
+        self.flight.load(cfg)
+        self.mcdu.load(cfg)
 
     def _on_connected(self, port):
         self.status.setText(f"Connected  ({port})")

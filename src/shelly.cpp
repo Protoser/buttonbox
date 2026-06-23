@@ -1,6 +1,7 @@
 #include "shelly.h"
 #include "settings.h"
 #include "pcstats.h"
+#include "hostlink.h"   // hostlinkSend() — bounded, non-blocking serial write
 #include <Preferences.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -248,7 +249,7 @@ void shellyQueueToggle() {
 
 void shellyToggle() {
   if (shellyCompanionMode()) {
-    Serial.println("shelly_toggle");   // companion will do the HTTP call
+    hostlinkSend("shelly_toggle\n");   // companion will do the HTTP call
   } else {
     shellyQueueToggle();
   }

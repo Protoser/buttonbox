@@ -1,34 +1,77 @@
 #include "hostlink.h"
+#include <stdarg.h>
 #include "pcstats.h"
 #include "settings.h"
 #include "shelly.h"
 #include "music.h"
 #include "wled.h"
 #include "beamng.h"
+#include "flight.h"
+#include "mcdu.h"
 #include "chords.h"
 #include "config.h"
 #include "clock.h"
 #include "ui.h"
 
-static char    lineBuf[128];
-static uint8_t lineLen = 0;
+static char     lineBuf[256];   // must hold the longest line; the flight telemetry line is ~210 chars
+static uint16_t lineLen = 0;
+
+// Send one line without ever blocking the input loop. USBCDC::write() spins forever
+// when the host has the port open but isn't reading; we instead write only what the
+// FIFO can take and give up after a short no-progress deadline (dropping the rest).
+void hostlinkSend(const char *s) {
+  size_t n = strlen(s), off = 0;
+  uint32_t start = millis();
+  while (off < n) {
+    int sp = Serial.availableForWrite();
+    if (sp > 0) {
+      size_t chunk = ((size_t)sp < n - off) ? (size_t)sp : (n - off);
+      Serial.write((const uint8_t *)s + off, chunk);   // chunk <= space, so write() can't spin
+      off += chunk;
+      start = millis();                                 // made progress -> extend the deadline
+    } else if (millis() - start > 30) {
+      break;                                            // host not draining: drop the rest
+    } else {
+      delay(1);                                         // brief, bounded yield while waiting for room
+    }
+  }
+}
+
+// Append printf-style to buf at offset n (cap = sizeof buf), never overflowing.
+static int cfgAppend(char *buf, int n, int cap, const char *fmt, ...) {
+  if (n >= cap - 1) return cap - 1;
+  va_list ap; va_start(ap, fmt);
+  int w = vsnprintf(buf + n, cap - n, fmt, ap);
+  va_end(ap);
+  if (w < 0) return n;
+  n += w;
+  return n > cap - 1 ? cap - 1 : n;
+}
 
 static void emitConfig() {
-  Serial.printf("cfg flip:%u labels:%u idle:%u chord:%u boot:%u pcorder:",
+  char buf[384]; int n = 0;
+  n = cfgAppend(buf, n, sizeof(buf), "cfg flip:%u labels:%u idle:%u chord:%u boot:%u pcorder:",
                 settings.flipped, settings.labelsGpio, settings.idleBlankSec,
                 settings.chordWindowMs, settings.bootSel);
   for (uint8_t i = 0; i < 5; i++)
-    Serial.printf(i == 0 ? "%u" : ",%u", settings.pcStatOrder[i]);
-  Serial.printf(" apporder:");
+    n = cfgAppend(buf, n, sizeof(buf), i == 0 ? "%u" : ",%u", settings.pcStatOrder[i]);
+  n = cfgAppend(buf, n, sizeof(buf), " apporder:");
   uint8_t ord[APP_ORDER_MAX]; uint8_t an = uiGetAppOrder(ord);
   for (uint8_t i = 0; i < an; i++)
-    Serial.printf(i == 0 ? "%u" : ",%u", ord[i]);
-  Serial.printf(" apphidden:%u", uiGetAppHidden());
-  Serial.printf(" wssid:%s ship:%s shuser:%s wmode:%u wledip:%s nchords:%u\n",
+    n = cfgAppend(buf, n, sizeof(buf), i == 0 ? "%u" : ",%u", ord[i]);
+  n = cfgAppend(buf, n, sizeof(buf), " apphidden:%u mcdumap:", uiGetAppHidden());
+  for (uint8_t i = 0; i < MCDU_MAP_N; i++)
+    n = cfgAppend(buf, n, sizeof(buf), i == 0 ? "%u" : ",%u", settings.mcduMap[i]);
+  n = cfgAppend(buf, n, sizeof(buf), " funits:%u engsty:%u", settings.flightUnits, settings.engStyle);
+  n = cfgAppend(buf, n, sizeof(buf), " wssid:%s ship:%s shuser:%s wmode:%u wledip:%s nchords:%u\n",
                 shellyConfig.wifiSsid, shellyConfig.shellyIp,
                 shellyConfig.shellyUser, settings.wifiMode, wledIp(), chordCount);
-  for (uint8_t i = 0; i < chordCount; i++)
-    Serial.printf("chd %u:%lu:%u\n", i, (unsigned long)chords[i].members, chords[i].output);
+  hostlinkSend(buf);
+  for (uint8_t i = 0; i < chordCount; i++) {
+    char cb[40];
+    snprintf(cb, sizeof(cb), "chd %u:%lu:%u\n", i, (unsigned long)chords[i].members, chords[i].output);
+    hostlinkSend(cb);
+  }
 }
 
 // args e.g. "flip:0" — values are validated/clamped, then persisted.
@@ -43,6 +86,17 @@ static void handleSet(char *args, uint32_t now) {
   else if (!strcmp(key, "idle"))   { settings.idleBlankSec  = (uint16_t)constrain(v, 0, 3600); }
   else if (!strcmp(key, "chord"))  { settings.chordWindowMs = (uint16_t)constrain(v, 0, 1000); }
   else if (!strcmp(key, "boot"))    { settings.bootSel = (uint8_t)constrain(v, 0, 32); }
+  else if (!strcmp(key, "funits"))  { settings.flightUnits = (uint8_t)constrain(v, 0, 3); }
+  else if (!strcmp(key, "engsty"))  { settings.engStyle    = (uint8_t)(v != 0); }
+  else if (!strcmp(key, "mcdumap")) {
+    char *p2 = colon + 1;
+    for (uint8_t i = 0; i < MCDU_MAP_N; i++) {
+      char *end; long idx = strtol(p2, &end, 10);
+      if (end == p2) break;
+      if (idx >= 0 && idx < MCDU_OUTPUT_COUNT) settings.mcduMap[i] = (uint8_t)idx;
+      p2 = end; if (*p2 == ',') p2++; else break;
+    }
+  }
   else if (!strcmp(key, "pcorder")) {
     char *p2 = colon + 1;
     for (uint8_t i = 0; i < 5; i++) {
@@ -64,7 +118,7 @@ static void handleSet(char *args, uint32_t now) {
     uiNoteActivity(now); emitConfig(); return;
   }
   else if (!strcmp(key, "apphidden")) {
-    uiSetAppHidden((uint8_t)v);                   // forces Menu visible + persists
+    uiSetAppHidden((uint16_t)v);                  // forces Menu visible + persists
     uiNoteActivity(now); emitConfig(); return;
   }
   else if (!strcmp(key, "wifi_mode")) {
@@ -136,6 +190,8 @@ static void dispatch(char *line, uint32_t now) {
   else if (!strncmp(line, "wled ", 5))    wledApplyFromCompanion(line + 5);
   else if (!strncmp(line, "music ", 6))   musicApply(line + 6, now);
   else if (!strncmp(line, "beamng ", 7))  beamngApply(line + 7, now);
+  else if (!strncmp(line, "flight ", 7))  flightApply(line + 7, now);
+  else if (!strncmp(line, "mcdu ", 5))    mcduApply(line + 5, now);
   else if (!strncmp(line, "time ", 5))    clockApplyHost(line + 5, now);
   else                                    pcStatsApply(line, now);   // PC telemetry
 }

@@ -24,12 +24,22 @@ try:
 except Exception:
     pass
 
+# SimConnect (Flight page) bundles SimConnect.dll as package data; pull the whole
+# package in if installed, else skip (Flight degrades to "Waiting for MSFS...").
+s_datas, s_bins, s_hidden = [], [], []
+try:
+    from PyInstaller.utils.hooks import collect_all
+    s_datas, s_bins, s_hidden = collect_all("SimConnect")
+except Exception:
+    pass
+
 a = Analysis(
     ["app.py"],
     pathex=[here],
-    binaries=w_bins,
-    datas=dll_datas + w_datas,
-    hiddenimports=["psutil", "serial.tools.list_ports"] + w_hidden,
+    binaries=w_bins + s_bins,
+    datas=dll_datas + w_datas + s_datas,
+    hiddenimports=["psutil", "serial.tools.list_ports", "PySide6.QtWebSockets",
+                   "PySide6.QtNetwork"] + w_hidden + s_hidden,
     hookspath=[],
     runtime_hooks=[],
     excludes=[],

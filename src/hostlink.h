@@ -15,3 +15,10 @@
 #include <Arduino.h>
 
 void hostlinkUpdate(uint32_t now);   // drain serial, parse + dispatch complete lines
+
+// Bounded, non-blocking serial write for ALL device->app output. The TinyUSB
+// USBCDC write() busy-spins forever when the host has the port open but isn't
+// reading, which would hang the input loop ("brick"). This writes only what the TX
+// FIFO can accept and gives up after a short deadline, so the loop never stalls.
+// Every module that talks back to the companion must send through this, not Serial.
+void hostlinkSend(const char *s);
