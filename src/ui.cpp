@@ -1929,11 +1929,13 @@ static void displayService() {
     u8g2.clearBuffer(); u8g2.sendBuffer(); blanked = true;
   }
 
-  // Backlight: full when active/awake, dimmed to brightIdle after dimIdleSec of idle,
-  // off entirely once blanked. Only writes the PWM when the target changes.
+  // Backlight: full when active/awake, dimmed after dimIdleSec of idle, off entirely
+  // once blanked. The idle level is a fraction OF the normal level (so it's always
+  // dimmer and tracks changes to normal). Only writes the PWM when the target changes.
   bool wantDim = (settings.dimIdleSec > 0 && !keepAwake &&
                   (now - lastActivity) > (uint32_t)settings.dimIdleSec * 1000);
-  uint8_t targetBl = blanked ? 0 : (wantDim ? settings.brightIdle : settings.brightFull);
+  uint8_t idleAbs  = (uint8_t)((uint16_t)settings.brightIdle * settings.brightFull / 100);
+  uint8_t targetBl = blanked ? 0 : (wantDim ? idleAbs : settings.brightFull);
   static uint8_t lastBl = 255;
   if (targetBl != lastBl) { displaySetBacklight(targetBl); lastBl = targetBl; }
 

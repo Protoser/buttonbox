@@ -203,7 +203,7 @@ class DisplayPane(SettingsPane):
         for val, text in IDLEBR_OPTS:
             self.idlebr.addItem(text, val)
         self.idlebr.currentIndexChanged.connect(lambda: self._set("bridle", self.idlebr.currentData()))
-        form.addRow("Idle brightness", self.idlebr)
+        form.addRow("Idle brightness (of normal)", self.idlebr)
 
         self.dim = QComboBox()
         for val, text in DIM_OPTS:
