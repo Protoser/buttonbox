@@ -1683,6 +1683,7 @@ static void drawMcdu() {
 // draw already flushed the framebuffer; we draw the bar into the retained buffer and
 // send again, so it appears on top without the page needing to know about it.
 static void drawBrightnessOverlay() {
+  u8g2.setMaxClipWindow();   // a clipped page (PFD/Music) may have left a clip active
   const int w = 104, h = 26, x = (128 - w) / 2, y = (64 - h) / 2;
   u8g2.setDrawColor(0); u8g2.drawBox(x - 1, y - 1, w + 2, h + 2);   // clear a panel
   u8g2.setDrawColor(1); u8g2.drawFrame(x - 1, y - 1, w + 2, h + 2);
@@ -1696,6 +1697,11 @@ static void drawBrightnessOverlay() {
 }
 
 static void render() {
+  // While the brightness overlay is up, don't redraw the page: draw the bar over the
+  // retained framebuffer and flush once. Redrawing the page would flush it (overlay
+  // gone) and then flush the overlay, making the bar blink off every heartbeat.
+  if (brightOvlActive(millis())) { drawBrightnessOverlay(); u8g2.sendBuffer(); return; }
+
   switch (page) {
     case PAGE_LAUNCHER:      drawLauncher();                                             break;
     case PAGE_BUTTONS:       drawHome();                                                 break;
@@ -1720,7 +1726,6 @@ static void render() {
     case PAGE_FLIGHT:        drawFlight();                                               break;
     case PAGE_MCDU:          drawMcdu();                                                 break;
   }
-  if (brightOvlActive(millis())) { drawBrightnessOverlay(); u8g2.sendBuffer(); }
 }
 
 // ----------------------------------------------------------------------------
