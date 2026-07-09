@@ -7,6 +7,12 @@ static const uint16_t IDLE_OPTIONS[] = {0, 30, 120};
 static const uint8_t  IDLE_N         = 3;
 static const uint16_t CW_OPTIONS[]   = {30, 40, 60, 80};
 static const uint8_t  CW_N           = 4;
+static const uint8_t  BRF_OPTIONS[]  = {25, 50, 75, 100};  // normal brightness %
+static const uint8_t  BRF_N          = 4;
+static const uint8_t  BRI_OPTIONS[]  = {0, 10, 20, 40};    // idle brightness %
+static const uint8_t  BRI_N          = 4;
+static const uint16_t DIM_OPTIONS[]  = {0, 10, 30, 60};    // auto-dim delay s (0 = off)
+static const uint8_t  DIM_N          = 4;
 
 void loadSettings() {
   Preferences p;
@@ -28,6 +34,9 @@ void loadSettings() {
       memcpy(settings.mcduMap, mdef, MCDU_MAP_N); }
   settings.flightUnits = p.getUChar("funits", 0);
   settings.engStyle    = p.getUChar("engsty", 0);
+  settings.brightFull  = p.getUChar("brfull", 100);
+  settings.brightIdle  = p.getUChar("bridle", 20);
+  settings.dimIdleSec  = p.getUShort("dimidle", 15);
   p.end();
 }
 
@@ -46,6 +55,9 @@ void saveSettings() {
   p.putBytes("mcdumap", settings.mcduMap, MCDU_MAP_N);
   p.putUChar("funits", settings.flightUnits);
   p.putUChar("engsty", settings.engStyle);
+  p.putUChar("brfull", settings.brightFull);
+  p.putUChar("bridle", settings.brightIdle);
+  p.putUShort("dimidle", settings.dimIdleSec);
   p.end();
 }
 
@@ -63,5 +75,26 @@ void settingsCycleChordWin() {
   uint8_t k = 0;
   for (uint8_t n = 0; n < CW_N; n++) if (CW_OPTIONS[n] == settings.chordWindowMs) k = n;
   settings.chordWindowMs = CW_OPTIONS[(k + 1) % CW_N];
+  saveSettings();
+}
+
+void settingsCycleBrightFull() {
+  uint8_t k = 0;
+  for (uint8_t n = 0; n < BRF_N; n++) if (BRF_OPTIONS[n] == settings.brightFull) k = n;
+  settings.brightFull = BRF_OPTIONS[(k + 1) % BRF_N];
+  saveSettings();
+}
+
+void settingsCycleBrightIdle() {
+  uint8_t k = 0;
+  for (uint8_t n = 0; n < BRI_N; n++) if (BRI_OPTIONS[n] == settings.brightIdle) k = n;
+  settings.brightIdle = BRI_OPTIONS[(k + 1) % BRI_N];
+  saveSettings();
+}
+
+void settingsCycleDimIdle() {
+  uint8_t k = 0;
+  for (uint8_t n = 0; n < DIM_N; n++) if (DIM_OPTIONS[n] == settings.dimIdleSec) k = n;
+  settings.dimIdleSec = DIM_OPTIONS[(k + 1) % DIM_N];
   saveSettings();
 }

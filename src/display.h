@@ -4,3 +4,4 @@
 
 extern U8G2_ST7920_128X64_F_SW_SPI u8g2;
 void displayBegin();
+void displaySetBacklight(uint8_t pct);   // backlight brightness, 0..100 %

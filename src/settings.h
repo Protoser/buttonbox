@@ -24,6 +24,9 @@ struct Settings {
   uint8_t  mcduMap[MCDU_MAP_N] = {3, 9, 4, 10, 5, 11, 6, 12, 7, 13, 1, 2, 17, 16};
   uint8_t  flightUnits    = 0;               // FU_* bitfield (speed/altitude units on the Flight display)
   uint8_t  engStyle       = 0;               // Engine view: 0 = dial gauges, 1 = bars
+  uint8_t  brightFull     = 100;             // active backlight brightness % (5..100)
+  uint8_t  brightIdle     = 20;              // dimmed backlight brightness % when idle (0..100)
+  uint16_t dimIdleSec     = 15;              // auto-dim to brightIdle after N s idle (0 = never)
 };
 extern Settings settings;
 
@@ -35,3 +38,6 @@ void settingsToggleFlip();
 void settingsToggleLabels();
 void settingsCycleIdle();
 void settingsCycleChordWin();
+void settingsCycleBrightFull();
+void settingsCycleBrightIdle();
+void settingsCycleDimIdle();

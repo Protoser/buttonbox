@@ -30,9 +30,13 @@ MCDU_WS_URL = "ws://localhost:8380/interfaces/v1/mcdu"   # FlyByWire SimBridge r
 # ---- constants mirrored from the firmware (config.h / settings) ----
 NUM_HID = 14            # physical buttons, shown 1..14
 OUT_MIN, OUT_MAX = 14, 31     # chord outputs (shown 15..32)
+OUT_BRIGHT = 32         # special chord output: open the backlight-brightness overlay (mirror chords.h CHORD_OUT_BRIGHT)
 MAX_CHORDS = 18
 IDLE_OPTS  = [(0, "Off"), (30, "30 s"), (120, "2 min")]
 CHORD_OPTS = [30, 40, 60, 80]
+BRIGHT_OPTS  = [(v, f"{v}%") for v in (10, 25, 40, 55, 70, 85, 100)]   # normal backlight brightness
+IDLEBR_OPTS  = [(0, "Off"), (10, "10%"), (20, "20%"), (40, "40%")]     # dimmed backlight brightness
+DIM_OPTS     = [(0, "Off"), (10, "10 s"), (30, "30 s"), (60, "60 s")]  # auto-dim delay
 BOOT_OPTS  = [(0, "Apps launcher"), (1, "Buttons"), (2, "Timer"), (3, "PC"), (4, "Shelly"),
               (5, "Music"), (6, "Menu"), (7, "WLED"), (8, "BeamNG"), (9, "Flight"), (10, "MCDU")]
 APP_NAMES  = ["Buttons", "Timer", "PC", "Shelly", "Music", "Menu", "WLED", "BeamNG", "Flight", "MCDU"]  # mirror ui.cpp APPS index order
@@ -189,6 +193,24 @@ class DisplayPane(SettingsPane):
         self.idle.currentIndexChanged.connect(lambda: self._set("idle", self.idle.currentData()))
         form.addRow("Idle blank", self.idle)
 
+        self.bright = QComboBox()
+        for val, text in BRIGHT_OPTS:
+            self.bright.addItem(text, val)
+        self.bright.currentIndexChanged.connect(lambda: self._set("brfull", self.bright.currentData()))
+        form.addRow("Brightness", self.bright)
+
+        self.idlebr = QComboBox()
+        for val, text in IDLEBR_OPTS:
+            self.idlebr.addItem(text, val)
+        self.idlebr.currentIndexChanged.connect(lambda: self._set("bridle", self.idlebr.currentData()))
+        form.addRow("Idle brightness", self.idlebr)
+
+        self.dim = QComboBox()
+        for val, text in DIM_OPTS:
+            self.dim.addItem(text, val)
+        self.dim.currentIndexChanged.connect(lambda: self._set("dimidle", self.dim.currentData()))
+        form.addRow("Auto-dim after", self.dim)
+
         self.boot = QComboBox()
         for val, text in BOOT_OPTS:
             self.boot.addItem(text, val)
@@ -203,6 +225,9 @@ class DisplayPane(SettingsPane):
         self.flip.setChecked(bool(cfg.get("flip", 0)))
         self._sel(self.labels, cfg.get("labels", 0))
         self._sel(self.idle, cfg.get("idle", 0))
+        self._sel(self.bright, cfg.get("brfull", 100))
+        self._sel(self.idlebr, cfg.get("bridle", 20))
+        self._sel(self.dim, cfg.get("dimidle", 15))
         self._sel(self.boot, cfg.get("boot", 1))
         self._loading = False
 
@@ -391,6 +416,7 @@ class ChordsPane(SettingsPane):
         self.out = QComboBox()
         for o in range(OUT_MIN, OUT_MAX + 1):
             self.out.addItem(f"Button {o + 1}", o)
+        self.out.addItem("Brightness overlay", OUT_BRIGHT)   # special: opens the on-screen dimmer
         row.addWidget(self.out)
         addbtn = QPushButton("Add")
         addbtn.clicked.connect(self._add)
@@ -412,7 +438,8 @@ class ChordsPane(SettingsPane):
         self.chords = chords
         self.list.clear()
         for c in chords:
-            self.list.addItem(f"#{c['index']}   {members_str(c['members'])}  →  Button {c['output'] + 1}")
+            out = "Brightness overlay" if c["output"] == OUT_BRIGHT else f"Button {c['output'] + 1}"
+            self.list.addItem(f"#{c['index']}   {members_str(c['members'])}  →  {out}")
         used = {c["output"] for c in chords}
         free = next((o for o in range(OUT_MIN, OUT_MAX + 1) if o not in used), OUT_MIN)
         self.out.setCurrentIndex(self.out.findData(free))

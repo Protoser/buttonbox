@@ -51,9 +51,13 @@ void loop() {
   if (buttonsAnyEdge())         uiNoteActivity(now);
   uiHandleMenuButton(now);        // tap = launcher/resume, hold = quick-switch app
 
-  // On non-Buttons pages the UI first claims the buttons it needs (the nav
-  // buttons, or all buttons on the capture/test pages) by suppressing them.
-  if (uiPage() != PAGE_BUTTONS) uiHandlePageInput();
+  // The brightness overlay (opened by a chord) is modal: while it's up it owns the
+  // nav buttons on whatever page is showing, so it runs before normal page input.
+  if (!uiHandleBrightness(now)) {
+    // On non-Buttons pages the UI first claims the buttons it needs (the nav
+    // buttons, or all buttons on the capture/test pages) by suppressing them.
+    if (uiPage() != PAGE_BUTTONS) uiHandlePageInput();
+  }
   // The chord/HID engine then runs on EVERY page: any button not claimed by the
   // UI stays a live gamepad button (so the non-nav buttons work everywhere).
   updateChords(now);

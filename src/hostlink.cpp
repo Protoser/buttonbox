@@ -62,7 +62,9 @@ static void emitConfig() {
   n = cfgAppend(buf, n, sizeof(buf), " apphidden:%u mcdumap:", uiGetAppHidden());
   for (uint8_t i = 0; i < MCDU_MAP_N; i++)
     n = cfgAppend(buf, n, sizeof(buf), i == 0 ? "%u" : ",%u", settings.mcduMap[i]);
-  n = cfgAppend(buf, n, sizeof(buf), " funits:%u engsty:%u", settings.flightUnits, settings.engStyle);
+  n = cfgAppend(buf, n, sizeof(buf), " funits:%u engsty:%u brfull:%u bridle:%u dimidle:%u",
+                settings.flightUnits, settings.engStyle,
+                settings.brightFull, settings.brightIdle, settings.dimIdleSec);
   n = cfgAppend(buf, n, sizeof(buf), " wssid:%s ship:%s shuser:%s wmode:%u wledip:%s nchords:%u\n",
                 shellyConfig.wifiSsid, shellyConfig.shellyIp,
                 shellyConfig.shellyUser, settings.wifiMode, wledIp(), chordCount);
@@ -88,6 +90,9 @@ static void handleSet(char *args, uint32_t now) {
   else if (!strcmp(key, "boot"))    { settings.bootSel = (uint8_t)constrain(v, 0, 32); }
   else if (!strcmp(key, "funits"))  { settings.flightUnits = (uint8_t)constrain(v, 0, 3); }
   else if (!strcmp(key, "engsty"))  { settings.engStyle    = (uint8_t)(v != 0); }
+  else if (!strcmp(key, "brfull"))  { settings.brightFull  = (uint8_t)constrain(v, 5, 100); }
+  else if (!strcmp(key, "bridle"))  { settings.brightIdle  = (uint8_t)constrain(v, 0, 100); }
+  else if (!strcmp(key, "dimidle")) { settings.dimIdleSec  = (uint16_t)constrain(v, 0, 3600); }
   else if (!strcmp(key, "mcdumap")) {
     char *p2 = colon + 1;
     for (uint8_t i = 0; i < MCDU_MAP_N; i++) {
@@ -164,7 +169,8 @@ static void handleChord(char *args) {
     *colon = 0;
     uint32_t mask = (uint32_t)strtoul(p, nullptr, 10);
     uint8_t  out  = (uint8_t)atoi(colon + 1);
-    if (__builtin_popcount(mask) >= 2 && chordCount < MAX_CHORDS && out >= NUM_HID && out < 32) {
+    if (__builtin_popcount(mask) >= 2 && chordCount < MAX_CHORDS && out >= NUM_HID &&
+        (out < 32 || out == CHORD_OUT_BRIGHT)) {
       chords[chordCount].members = mask;
       chords[chordCount].output  = out;
       chordCount++;

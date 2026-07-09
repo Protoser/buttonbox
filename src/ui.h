@@ -18,6 +18,8 @@ void uiHandleMenuButton(uint32_t now); // menu/toggle button: tap=launcher, hold
 void uiHandlePageInput();             // physical-button presses on a non-HOME page
 void uiHandleTimerLap(uint32_t now);  // Lap button: tap=record, hold=undo+open list
 void uiHandleWledBright(uint32_t now); // WLED Bright focus: hold Up/Down to scroll, send on release
+void uiBrightnessChord(uint32_t now);  // open/extend the backlight-brightness overlay (from a chord)
+bool uiHandleBrightness(uint32_t now); // drive the overlay; returns true while it owns the nav buttons
 // The display is rendered by a dedicated task on core 0 (started in uiBegin), so the
 // slow ST7920 flush never blocks the core-1 input loop. No per-loop display call.
 

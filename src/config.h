@@ -12,6 +12,11 @@ static const uint8_t LCD_CLOCK_PIN = 17;  // ST7920 E   (clock)
 static const uint8_t LCD_DATA_PIN  = 18;  // ST7920 R/W (data / MOSI)
 static const uint8_t LCD_CS_PIN    = 21;  // ST7920 RS  (chip select)
 
+// ---- Backlight dimming ----
+// GPIO -> series resistor -> backlight LED. Driven by LEDC PWM (see display.cpp);
+// duty sets brightness. Low current, so no MOSFET — the pin sinks/sources it direct.
+static const uint8_t LCD_BACKLIGHT_PIN = 38;
+
 // ---- Mode toggle ("menu" button) ----
 // The cluster button wired to GPIO 2 (the one you use as the menu button).
 // Switches the 4 nav buttons between HID buttons (NORMAL) and on-screen

@@ -43,10 +43,21 @@ static uint32_t wledBriStepAt = 0;
 static const uint8_t  WLED_BRI_STEP      = 8;
 static const uint16_t WLED_BRI_REPEAT_MS = 70;
 
+// Backlight-brightness overlay: a special chord opens it (uiBrightnessChord); while
+// it's up (until brightOvlUntil) Up/Down step settings.brightFull, Select/Back close.
+// brightOvlUntil is set on core 1 (input loop) and read on core 0 (render), so volatile.
+static volatile uint32_t brightOvlUntil = 0;
+static bool              brightDirty    = false;   // an edit is pending a save on close
+static const uint16_t    BRIGHT_OVL_MS  = 4000;    // auto-close after this idle
+static const uint8_t     BRIGHT_STEP    = 5;       // % per Up/Down press
+static const uint8_t     BRIGHT_MIN     = 5;       // never let the overlay black the screen out
+static inline bool brightOvlActive(uint32_t now) { return (int32_t)(brightOvlUntil - now) > 0; }
+
 static const char *MENU_ITEMS[]     = {"Button Test", "Chords", "Settings", "App Order", "MCDU Keys", "Flash Mode", "Back"};
 static const uint8_t MENU_COUNT     = 7;
-static const char *SETTINGS_ITEMS[] = {"Rotate", "Labels", "Idle", "Chord", "Boot", "WiFi", "Back"};
-static const uint8_t SETTINGS_COUNT = 7;
+static const char *SETTINGS_ITEMS[] = {"Rotate", "Labels", "Idle blank", "Brightness", "Idle bright",
+                                       "Auto-dim", "Chord", "Boot", "WiFi", "Back"};
+static const uint8_t SETTINGS_COUNT = 10;
 static const char *PCSTAT_ITEMS[]   = {"CPU", "RAM", "GPU", "CPU Temp", "GPU Temp",
                                        "VRAM", "CPU Pwr", "GPU Pwr"};
 static const uint8_t PCSTAT_NUM      = 8;   // number of selectable stats
@@ -250,10 +261,13 @@ static void handleNav(uint8_t a) {
         case 0: settingsToggleFlip(); orientDirty = true; displayDirty = true;  break;
         case 1: settingsToggleLabels();                                         break;
         case 2: settingsCycleIdle();                                            break;
-        case 3: settingsCycleChordWin();                                        break;
-        case 4: settings.bootSel = (settings.bootSel + 1) % (APP_COUNT + 1); saveSettings(); break;
-        case 5: settings.wifiMode = (settings.wifiMode + 1) % 3; saveSettings(); shellyRestartWifi(); break;
-        case 6: gotoPage(PAGE_MENU); return;
+        case 3: settingsCycleBrightFull();                                      break;
+        case 4: settingsCycleBrightIdle();                                      break;
+        case 5: settingsCycleDimIdle();                                         break;
+        case 6: settingsCycleChordWin();                                        break;
+        case 7: settings.bootSel = (settings.bootSel + 1) % (APP_COUNT + 1); saveSettings(); break;
+        case 8: settings.wifiMode = (settings.wifiMode + 1) % 3; saveSettings(); shellyRestartWifi(); break;
+        case 9: gotoPage(PAGE_MENU); return;
       }
       break;
 
@@ -286,8 +300,8 @@ static void handleNav(uint8_t a) {
     }
 
     case PAGE_CHORD_OUTPUT:
-      if      (a == NAV_UP)   outputSel = (outputSel >= 31)      ? NUM_HID : outputSel + 1;
-      else if (a == NAV_DOWN) outputSel = (outputSel <= NUM_HID) ? 31      : outputSel - 1;
+      if      (a == NAV_UP)   outputSel = (outputSel >= CHORD_OUT_BRIGHT) ? NUM_HID          : outputSel + 1;
+      else if (a == NAV_DOWN) outputSel = (outputSel <= NUM_HID)          ? CHORD_OUT_BRIGHT : outputSel - 1;
       else if (a == NAV_BACK) { gotoPage(editingOutput ? PAGE_CHORD_EDIT : PAGE_CHORDS); return; }
       else {
         if (editingOutput) chords[editChord].output = outputSel;
@@ -525,13 +539,19 @@ static void drawList(const char *title, const char *const *items, uint8_t count,
           else if (settings.idleBlankSec < 60) snprintf(val, sizeof(val), "%us", settings.idleBlankSec);
           else                                 snprintf(val, sizeof(val), "%umin", settings.idleBlankSec / 60);
           break;
-        case 3: snprintf(val, sizeof(val), "%ums", settings.chordWindowMs); break;
-        case 4: {
+        case 3: snprintf(val, sizeof(val), "%u%%", settings.brightFull); break;
+        case 4: snprintf(val, sizeof(val), "%u%%", settings.brightIdle); break;
+        case 5:
+          if (settings.dimIdleSec == 0) snprintf(val, sizeof(val), "Off");
+          else                          snprintf(val, sizeof(val), "%us", settings.dimIdleSec);
+          break;
+        case 6: snprintf(val, sizeof(val), "%ums", settings.chordWindowMs); break;
+        case 7: {
           uint8_t bs = (settings.bootSel > APP_COUNT) ? 0 : settings.bootSel;
           snprintf(val, sizeof(val), "%s", bs == 0 ? "Apps" : APPS[bs - 1].name);
           break;
         }
-        case 5: {
+        case 8: {
           const char *wm[] = {"Off", "On", "Auto"};
           snprintf(val, sizeof(val), "%s", wm[settings.wifiMode % 3]);
           break;
@@ -621,7 +641,11 @@ static void drawChords() {
     uint8_t y = 16 + row * 12;
     if (idx == sel) { u8g2.drawBox(cL(), y, 110, 12); u8g2.setDrawColor(0); }
     char buf[24];
-    if (idx < chordCount) { char mem[18]; fmtMembers(chords[idx].members, mem, sizeof(mem)); snprintf(buf, sizeof(buf), "%s>%u", mem, chords[idx].output + 1); }
+    if (idx < chordCount) {
+      char mem[18]; fmtMembers(chords[idx].members, mem, sizeof(mem));
+      if (chords[idx].output == CHORD_OUT_BRIGHT) snprintf(buf, sizeof(buf), "%s>Bri", mem);
+      else                                        snprintf(buf, sizeof(buf), "%s>%u", mem, chords[idx].output + 1);
+    }
     else if (idx == chordCount) snprintf(buf, sizeof(buf), "[ Add chord ]");
     else snprintf(buf, sizeof(buf), "Back");
     u8g2.drawStr(cL()+3, y + 10, buf);
@@ -646,7 +670,9 @@ static void drawChordOutput() {
   drawListHeader(editingOutput ? "EDIT OUT" : "OUTPUT");
   char mem[24]; fmtMembers(editingOutput ? chords[editChord].members : pendingMembers, mem, sizeof(mem));
   u8g2.setFont(u8g2_font_6x12_tr); u8g2.drawStr(cL()+2, 30, mem);
-  char line[20]; snprintf(line, sizeof(line), "-> button %u", outputSel + 1);
+  char line[20];
+  if (outputSel == CHORD_OUT_BRIGHT) snprintf(line, sizeof(line), "-> Brightness");
+  else                               snprintf(line, sizeof(line), "-> button %u", outputSel + 1);
   u8g2.drawStr(cL()+2, 48, line);
   drawNavLegend(LIST_HINTS);
   u8g2.sendBuffer();
@@ -654,7 +680,9 @@ static void drawChordOutput() {
 
 static void drawChordEdit() {
   drawListHeader("EDIT CHD");
-  char outItem[16]; snprintf(outItem, sizeof(outItem), "Output: %u", chords[editChord].output + 1);
+  char outItem[16];
+  if (chords[editChord].output == CHORD_OUT_BRIGHT) snprintf(outItem, sizeof(outItem), "Output: Bri");
+  else                                              snprintf(outItem, sizeof(outItem), "Output: %u", chords[editChord].output + 1);
   const char *items[3] = {outItem, "Delete", "Back"};
   for (uint8_t row = 0; row < 3; row++) {
     uint8_t y = 16 + row * 12;
@@ -1651,6 +1679,22 @@ static void drawMcdu() {
   u8g2.sendBuffer();
 }
 
+// Backlight-brightness overlay, composited over whatever page is showing. The page
+// draw already flushed the framebuffer; we draw the bar into the retained buffer and
+// send again, so it appears on top without the page needing to know about it.
+static void drawBrightnessOverlay() {
+  const int w = 104, h = 26, x = (128 - w) / 2, y = (64 - h) / 2;
+  u8g2.setDrawColor(0); u8g2.drawBox(x - 1, y - 1, w + 2, h + 2);   // clear a panel
+  u8g2.setDrawColor(1); u8g2.drawFrame(x - 1, y - 1, w + 2, h + 2);
+  u8g2.setFont(u8g2_font_6x12_tr);
+  char t[16]; snprintf(t, sizeof(t), "Bright %u%%", settings.brightFull);
+  u8g2.drawStr(x + (w - u8g2.getStrWidth(t)) / 2, y + 10, t);
+  const int bx = x + 4, by = y + 15, bw = w - 8, bh = 8;
+  u8g2.drawFrame(bx, by, bw, bh);
+  int fill = (int)((long)(bw - 2) * settings.brightFull / 100);
+  if (fill > 0) u8g2.drawBox(bx + 1, by + 1, fill, bh - 2);
+}
+
 static void render() {
   switch (page) {
     case PAGE_LAUNCHER:      drawLauncher();                                             break;
@@ -1676,6 +1720,7 @@ static void render() {
     case PAGE_FLIGHT:        drawFlight();                                               break;
     case PAGE_MCDU:          drawMcdu();                                                 break;
   }
+  if (brightOvlActive(millis())) { drawBrightnessOverlay(); u8g2.sendBuffer(); }
 }
 
 // ----------------------------------------------------------------------------
@@ -1813,6 +1858,51 @@ void uiHandleWledBright(uint32_t now) {
   }
 }
 
+// Opened by a chord (see chords.cpp). Works from any page because the chord engine
+// runs on every page; the overlay is drawn on top and its input handled below.
+void uiBrightnessChord(uint32_t now) {
+  brightOvlUntil = now + BRIGHT_OVL_MS;
+  uiNoteActivity(now);   // wake + full brightness so the bar is actually visible
+}
+
+// While the overlay is up it owns the nav buttons: Up/Down step brightness, Select
+// or Back closes, and it auto-closes after BRIGHT_OVL_MS. Returns true whenever it
+// was active this pass, so the loop skips the normal page-input for these buttons.
+bool uiHandleBrightness(uint32_t now) {
+  static bool wasActive = false;
+  if (!brightOvlActive(now)) {
+    if (wasActive) {                                 // just closed (Select/Back or timeout)
+      if (brightDirty) { saveSettings(); brightDirty = false; }
+      displayDirty = true;                           // repaint the page without the overlay
+      wasActive = false;
+    }
+    return false;
+  }
+  wasActive = true;
+
+  Button &up   = navBtns[NUM_NAV - 1 - NAV_UP];
+  Button &down = navBtns[NUM_NAV - 1 - NAV_DOWN];
+  Button &selB = navBtns[NUM_NAV - 1 - NAV_SELECT];
+  Button &back = navBtns[NUM_NAV - 1 - NAV_BACK];
+
+  if (pressedEdge(up)) {
+    settings.brightFull = (uint8_t)constrain(settings.brightFull + BRIGHT_STEP, BRIGHT_MIN, 100);
+    brightDirty = true; brightOvlUntil = now + BRIGHT_OVL_MS;
+    uiSuppressedMask |= (1u << (NUM_ALWAYS + (NUM_NAV - 1 - NAV_UP)));
+    uiNoteActivity(now);   // wake to full brightness + redraw the bar
+  }
+  if (pressedEdge(down)) {
+    settings.brightFull = (uint8_t)constrain((int)settings.brightFull - BRIGHT_STEP, BRIGHT_MIN, 100);
+    brightDirty = true; brightOvlUntil = now + BRIGHT_OVL_MS;
+    uiSuppressedMask |= (1u << (NUM_ALWAYS + (NUM_NAV - 1 - NAV_DOWN)));
+    uiNoteActivity(now);
+  }
+  if (pressedEdge(selB)) { brightOvlUntil = now; uiSuppressedMask |= (1u << (NUM_ALWAYS + (NUM_NAV - 1 - NAV_SELECT))); }
+  if (pressedEdge(back)) { brightOvlUntil = now; uiSuppressedMask |= (1u << (NUM_ALWAYS + (NUM_NAV - 1 - NAV_BACK))); }
+
+  return true;   // owned the nav buttons this pass; the close transition is handled above
+}
+
 // One pass of the display logic: idle-blank + heartbeat/dirty redraw. Runs only on
 // the core-0 render task, which is the sole owner of the panel at runtime. Core 1
 // merely raises displayDirty / orientDirty / blanked; this consumes them.
@@ -1833,6 +1923,15 @@ static void displayService() {
       (now - lastActivity) > (uint32_t)settings.idleBlankSec * 1000) {
     u8g2.clearBuffer(); u8g2.sendBuffer(); blanked = true;
   }
+
+  // Backlight: full when active/awake, dimmed to brightIdle after dimIdleSec of idle,
+  // off entirely once blanked. Only writes the PWM when the target changes.
+  bool wantDim = (settings.dimIdleSec > 0 && !keepAwake &&
+                  (now - lastActivity) > (uint32_t)settings.dimIdleSec * 1000);
+  uint8_t targetBl = blanked ? 0 : (wantDim ? settings.brightIdle : settings.brightFull);
+  static uint8_t lastBl = 255;
+  if (targetBl != lastBl) { displaySetBacklight(targetBl); lastBl = targetBl; }
+
   uint32_t heartbeat = keepAwake ? 100 : 200;
   bool dirty = displayDirty;
   displayDirty = false;            // clear before drawing so a change mid-render re-marks it
