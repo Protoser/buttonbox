@@ -10,9 +10,7 @@ and the setters are no-ops, so the companion still runs — the box just shows t
 "No companion" placeholder on the Volume page.
 """
 try:
-    from ctypes import cast, POINTER
-    from comtypes import CLSCTX_ALL
-    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+    from pycaw.pycaw import AudioUtilities
     _OK = True
 except Exception:                       # noqa: BLE001 — pycaw/comtypes absent or not Windows
     _OK = False
@@ -26,9 +24,7 @@ def available():
 
 
 def _master_endpoint():
-    devices = AudioUtilities.GetSpeakers()
-    interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-    return cast(interface, POINTER(IAudioEndpointVolume))
+    return AudioUtilities.GetSpeakers().EndpointVolume   # IAudioEndpointVolume
 
 
 def _clean(name):
