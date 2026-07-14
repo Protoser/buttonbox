@@ -1947,8 +1947,14 @@ void uiHandlePageInput() {
   // PAGE_MCDUMAP captures a button press to pick which one to remap, so it grabs all too.
   bool grabAll = (page == PAGE_CHORD_CAPTURE || page == PAGE_BTNTEST || page == PAGE_MCDU ||
                   page == PAGE_MCDUMAP);
+  // While the menu button is held, buttons that form a chord WITH it belong to the
+  // chord engine, not the page UI — otherwise a Menu+nav chord could never form on
+  // pages that claim the nav buttons. (Not on capture, where menu is the save key.)
+  uint32_t menuBuddies = (toggleBtn.pressed && page != PAGE_CHORD_CAPTURE)
+                             ? chordToggleBuddyMask() : 0;
   for (uint8_t i = 0; i < NUM_HID; i++) {
     if (!pressedEdge(physBtn(i))) continue;
+    if (menuBuddies & (1u << i)) continue;        // leave it for the menu chord
     bool isNav = (i >= NUM_ALWAYS);
     if (!grabAll && !isNav) continue;             // non-nav button stays a live gamepad button
     uiSuppressedMask |= (1u << i);
@@ -1970,6 +1976,8 @@ void uiHandleTimerLap(uint32_t now) {
   // NAV_DOWN physical index, reversed when screen is flipped
   uint8_t lapIdx = NUM_NAV - 1 - NAV_DOWN;
   Button &lap = navBtns[lapIdx];
+  // Menu held + this button forms a menu chord -> it's the chord's, not a lap.
+  if (toggleBtn.pressed && (chordToggleBuddyMask() & (1u << (NUM_ALWAYS + lapIdx)))) return;
   if (pressedEdge(lap)) {
     lapHoldStart = now; lapHoldHandled = false;
     lapRecordedPress = swRecordLap(now);

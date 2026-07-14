@@ -35,3 +35,4 @@ void    updateChords(uint32_t now);          // HID engine, call on HOME
 void    resetChordEngine();                  // release everything, call when leaving HOME
 int8_t  activeChordOutput();                 // HID index of active chord output, or -1
 bool    chordToggleHeld();                   // true while the menu button is consumed by a chord
+uint32_t chordToggleBuddyMask();             // buttons that form a chord WITH the menu button

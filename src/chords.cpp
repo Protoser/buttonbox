@@ -67,6 +67,16 @@ void resetChordEngine() {
 
 bool chordToggleHeld() { return (chordOwnedMask & (1u << CHORD_MEMBER_TOGGLE)) != 0; }
 
+// Physical buttons that appear in a chord together with the menu button. While the
+// menu button is held, the UI leaves these to the chord engine (see uiHandlePageInput)
+// so a Menu+nav chord can form on pages where nav buttons are normally claimed.
+uint32_t chordToggleBuddyMask() {
+  uint32_t m = 0;
+  for (uint8_t c = 0; c < chordCount; c++)
+    if (chords[c].members & (1u << CHORD_MEMBER_TOGGLE)) m |= chords[c].members;
+  return m & ~(1u << CHORD_MEMBER_TOGGLE);
+}
+
 void updateChords(uint32_t now) {
   uint32_t physMask = 0;
   for (uint8_t i = 0; i < NUM_HID; i++) {
