@@ -127,6 +127,17 @@ class DeviceLink(QThread):
                 target = int(who)
             except ValueError:
                 return
+        pct = max(0, min(100, pct))
+        # Update our cached state right away so the next stream tick reflects the box's
+        # change instead of the stale pre-change value — otherwise the box's level
+        # visibly snaps back until _volume_loop has applied + re-read the mixer (~0.7 s).
+        with self._volume_lock:
+            if target == "master":
+                self._volume["master"] = pct
+            else:
+                apps = self._volume.get("apps", [])
+                if isinstance(target, int) and 0 <= target < len(apps):
+                    apps[target] = (apps[target][0], pct)
         self._volume_cmds.put((target, pct))
     def flash(self):
         self.send("flash")
