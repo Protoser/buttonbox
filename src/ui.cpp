@@ -10,6 +10,7 @@
 #include "shelly.h"
 #include "music.h"
 #include "wled.h"
+#include "volume.h"
 #include "beamng.h"
 #include "flight.h"
 #include "mcdu.h"
@@ -53,6 +54,11 @@ static const uint16_t    BRIGHT_OVL_MS  = 4000;    // auto-close after this idle
 static const uint8_t     BRIGHT_STEP    = 5;       // % per Up/Down press
 static const uint8_t     BRIGHT_MIN     = 5;       // never let the overlay black the screen out
 static inline bool brightOvlActive(uint32_t now) { return (int32_t)(brightOvlUntil - now) > 0; }
+
+// Volume mixer page: sel = row (0 = master, 1.. = apps). When volAdjust is set the
+// Up/Down buttons change the selected row's volume instead of moving the cursor.
+static bool volAdjust = false;
+static const uint8_t VOL_STEP = 5;
 
 static const char *MENU_ITEMS[]     = {"Button Test", "Chords", "Settings", "App Order", "MCDU Keys", "Flash Mode", "Back"};
 static const uint8_t MENU_COUNT     = 7;
@@ -132,6 +138,7 @@ static void iconWled(int cx, int cy);
 static void iconBeamng(int cx, int cy);
 static void iconFlight(int cx, int cy);
 static void iconMcdu(int cx, int cy);
+static void iconVolume(int cx, int cy);
 
 struct App { const char *name; void (*drawIcon)(int cx, int cy); Page page; };
 // New apps append here so existing persisted app indices (appOrder/appHidden) stay valid.
@@ -147,6 +154,7 @@ static const App APPS[] = {
   {"Flight",  iconFlight,  PAGE_FLIGHT},
   {"MCDU",    iconMcdu,    PAGE_MCDU},
   {"Timer",   iconCdTimer, PAGE_CDTIMER},
+  {"Volume",  iconVolume,  PAGE_VOLUME},
 };
 static const uint8_t APP_COUNT = sizeof(APPS) / sizeof(APPS[0]);
 
@@ -310,6 +318,25 @@ static void handleNav(uint8_t a) {
       break;
     }
 
+    case PAGE_VOLUME: {
+      uint8_t rows = volumeCount() + 1;              // row 0 = master, then one per app
+      if (volAdjust) {                               // Up/Down change the selected volume
+        int d = (a == NAV_UP) ? +VOL_STEP : (a == NAV_DOWN) ? -VOL_STEP : 0;
+        if (d) {
+          if (sel == 0) volumeSetMaster((uint8_t)constrain((int)volumeMaster() + d, 0, 100));
+          else          volumeSetApp(sel - 1, (uint8_t)constrain((int)volumeVol(sel - 1) + d, 0, 100));
+        } else {                                     // Select or Back leaves adjust mode
+          volAdjust = false;
+        }
+      } else {                                       // Up/Down move the cursor
+        if      (a == NAV_UP)     { if (sel > 0) sel--; }
+        else if (a == NAV_DOWN)   { if (sel < rows - 1) sel++; }
+        else if (a == NAV_SELECT) volAdjust = true;
+        else if (a == NAV_BACK)   { gotoPage(PAGE_LAUNCHER); return; }
+      }
+      break;
+    }
+
     case PAGE_CHORDS: {
       uint8_t count = chordCount + 2;
       if      (a == NAV_UP)   { if (sel > 0) sel--; }
@@ -324,8 +351,8 @@ static void handleNav(uint8_t a) {
     }
 
     case PAGE_CHORD_OUTPUT:
-      if      (a == NAV_UP)   outputSel = (outputSel >= CHORD_OUT_BRIGHT) ? NUM_HID          : outputSel + 1;
-      else if (a == NAV_DOWN) outputSel = (outputSel <= NUM_HID)          ? CHORD_OUT_BRIGHT : outputSel - 1;
+      if      (a == NAV_UP)   outputSel = (outputSel >= CHORD_OUT_VOLUME) ? NUM_HID          : outputSel + 1;
+      else if (a == NAV_DOWN) outputSel = (outputSel <= NUM_HID)          ? CHORD_OUT_VOLUME : outputSel - 1;
       else if (a == NAV_BACK) { gotoPage(editingOutput ? PAGE_CHORD_EDIT : PAGE_CHORDS); return; }
       else {
         if (editingOutput) chords[editChord].output = outputSel;
@@ -519,6 +546,8 @@ static void fmtMembers(uint32_t mask, char *buf, size_t n) {
   size_t pos = 0; bool first = true;
   for (uint8_t i = 0; i < NUM_HID && pos < n - 1; i++)
     if (mask & (1u << i)) { pos += snprintf(buf + pos, n - pos, first ? "%u" : "+%u", i + 1); first = false; }
+  if ((mask & (1u << CHORD_MEMBER_TOGGLE)) && pos < n - 1)   // the menu button as a member
+    pos += snprintf(buf + pos, n - pos, first ? "M" : "+M"), first = false;
   if (first) snprintf(buf, n, "(none)");
 }
 
@@ -700,8 +729,9 @@ static void drawChords() {
     char buf[24];
     if (idx < chordCount) {
       char mem[18]; fmtMembers(chords[idx].members, mem, sizeof(mem));
-      if (chords[idx].output == CHORD_OUT_BRIGHT) snprintf(buf, sizeof(buf), "%s>Bri", mem);
-      else                                        snprintf(buf, sizeof(buf), "%s>%u", mem, chords[idx].output + 1);
+      if      (chords[idx].output == CHORD_OUT_BRIGHT) snprintf(buf, sizeof(buf), "%s>Bri", mem);
+      else if (chords[idx].output == CHORD_OUT_VOLUME) snprintf(buf, sizeof(buf), "%s>Vol", mem);
+      else                                             snprintf(buf, sizeof(buf), "%s>%u", mem, chords[idx].output + 1);
     }
     else if (idx == chordCount) snprintf(buf, sizeof(buf), "[ Add chord ]");
     else snprintf(buf, sizeof(buf), "Back");
@@ -728,8 +758,9 @@ static void drawChordOutput() {
   char mem[24]; fmtMembers(editingOutput ? chords[editChord].members : pendingMembers, mem, sizeof(mem));
   u8g2.setFont(u8g2_font_6x12_tr); u8g2.drawStr(cL()+2, 30, mem);
   char line[20];
-  if (outputSel == CHORD_OUT_BRIGHT) snprintf(line, sizeof(line), "-> Brightness");
-  else                               snprintf(line, sizeof(line), "-> button %u", outputSel + 1);
+  if      (outputSel == CHORD_OUT_BRIGHT) snprintf(line, sizeof(line), "-> Brightness");
+  else if (outputSel == CHORD_OUT_VOLUME) snprintf(line, sizeof(line), "-> Volume");
+  else                                    snprintf(line, sizeof(line), "-> button %u", outputSel + 1);
   u8g2.drawStr(cL()+2, 48, line);
   drawNavLegend(LIST_HINTS);
   u8g2.sendBuffer();
@@ -738,8 +769,9 @@ static void drawChordOutput() {
 static void drawChordEdit() {
   drawListHeader("EDIT CHD");
   char outItem[16];
-  if (chords[editChord].output == CHORD_OUT_BRIGHT) snprintf(outItem, sizeof(outItem), "Output: Bri");
-  else                                              snprintf(outItem, sizeof(outItem), "Output: %u", chords[editChord].output + 1);
+  if      (chords[editChord].output == CHORD_OUT_BRIGHT) snprintf(outItem, sizeof(outItem), "Output: Bri");
+  else if (chords[editChord].output == CHORD_OUT_VOLUME) snprintf(outItem, sizeof(outItem), "Output: Vol");
+  else                                                   snprintf(outItem, sizeof(outItem), "Output: %u", chords[editChord].output + 1);
   const char *items[3] = {outItem, "Delete", "Back"};
   for (uint8_t row = 0; row < 3; row++) {
     uint8_t y = 16 + row * 12;
@@ -824,6 +856,50 @@ static void iconMcdu(int cx, int cy) {               // MCDU: screen over a keyp
   for (uint8_t r = 0; r < 3; r++)                    // 3x3 keypad of dots
     for (uint8_t c = 0; c < 3; c++)
       u8g2.drawPixel(cx - 4 + c * 4, cy + 2 + r * 3);
+}
+
+static void iconVolume(int cx, int cy) {             // speaker + sound waves
+  u8g2.drawBox(cx - 6, cy - 2, 3, 5);                // magnet/back
+  u8g2.drawTriangle(cx - 3, cy - 6, cx - 3, cy + 7, cx + 2, cy);   // cone
+  u8g2.drawLine(cx + 4, cy - 3, cx + 4, cy + 3);     // near wave
+  u8g2.drawLine(cx + 6, cy - 5, cx + 6, cy + 5);     // far wave
+}
+
+// Volume mixer: master + per-app rows, each a labelled volume bar. Up/Down move the
+// cursor; Select toggles "adjust" (an inner frame) where Up/Down change the level.
+static void drawVolume() {
+  drawListHeader("VOLUME");
+  uint32_t now = millis();
+  if (!volumeFresh(now)) {
+    u8g2.setFont(u8g2_font_6x12_tr);
+    u8g2.drawStr(cL() + 2, 40, "No companion");
+    drawNavLegend(LIST_HINTS);
+    u8g2.sendBuffer();
+    return;
+  }
+  uint8_t rows = volumeCount() + 1;                  // row 0 = master
+  const uint8_t visible = 4;
+  uint8_t start = (sel >= visible) ? (sel - visible + 1) : 0;
+  u8g2.setFont(u8g2_font_5x7_tr);
+  for (uint8_t r = 0; r < visible && (start + r) < rows; r++) {
+    uint8_t idx = start + r;
+    uint8_t y = 16 + r * 12;
+    bool selrow = (idx == sel);
+    if (selrow) { u8g2.drawBox(cL(), y, cR() - cL(), 12); u8g2.setDrawColor(0); }
+    const char *nm  = (idx == 0) ? "Master" : volumeName(idx - 1);
+    uint8_t     vol = (idx == 0) ? volumeMaster() : volumeVol(idx - 1);
+    u8g2.drawStr(cL() + 2, y + 9, nm);
+    int bx = cL() + 52, bw = (cR() - 18) - bx, by = y + 3, bh = 6;
+    u8g2.drawFrame(bx, by, bw, bh);
+    int fill = (int)((long)(bw - 2) * vol / 100);
+    if (fill > 0) u8g2.drawBox(bx + 1, by + 1, fill, bh - 2);
+    char pv[5]; snprintf(pv, sizeof(pv), "%u", vol);
+    u8g2.drawStr(cR() - 2 - u8g2.getStrWidth(pv), y + 9, pv);
+    if (selrow && volAdjust) u8g2.drawFrame(cL() + 1, y + 1, (cR() - cL()) - 2, 10);  // editing
+    u8g2.setDrawColor(1);
+  }
+  drawNavLegend(LIST_HINTS);
+  u8g2.sendBuffer();
 }
 
 // App launcher: 3-column icon grid (right of the nav legend); selected cell
@@ -1791,6 +1867,7 @@ static void render() {
     case PAGE_BEAMNG:        drawBeamng();                                               break;
     case PAGE_FLIGHT:        drawFlight();                                               break;
     case PAGE_MCDU:          drawMcdu();                                                 break;
+    case PAGE_VOLUME:        drawVolume();                                               break;
   }
 }
 
@@ -1834,6 +1911,10 @@ void uiEnterFlash()       { enterBootloader(); }
 // launcher and swapping last<->current so repeated holds toggle between two apps.
 void uiHandleMenuButton(uint32_t now) {
   if (pressedEdge(toggleBtn)) { menuHoldStart = now; menuHoldHandled = false; }
+
+  // If the menu button is currently part of an active chord, it's acting as a chord
+  // member, not the menu key — swallow its tap/hold so it doesn't also switch apps.
+  if (chordToggleHeld()) { menuHoldHandled = true; return; }
 
   if (toggleBtn.pressed && !menuHoldHandled && page != PAGE_CHORD_CAPTURE &&
       (now - menuHoldStart) >= MENU_HOLD_MS) {
@@ -1975,6 +2056,15 @@ void uiBrightnessChord(uint32_t now) {
   uiNoteActivity(now);   // wake + full brightness so the bar is actually visible
 }
 
+// Opened by a chord (see chords.cpp). Jumps to the volume mixer page and asks the
+// companion to push current audio state so the bars are populated right away.
+void uiOpenVolume(uint32_t now) {
+  volAdjust = false;
+  gotoPage(PAGE_VOLUME);
+  volumeRequest();
+  uiNoteActivity(now);
+}
+
 // While the overlay is up it owns the nav buttons: Up/Down step brightness, Select
 // or Back closes, and it auto-closes after BRIGHT_OVL_MS. Returns true whenever it
 // was active this pass, so the loop skips the normal page-input for these buttons.
@@ -2027,6 +2117,7 @@ static void displayService() {
                    (page == PAGE_BEAMNG && beamngFresh(now)) ||
                    (page == PAGE_FLIGHT && flightFresh(now)) ||
                    (page == PAGE_MCDU && mcduFresh(now)) ||
+                   (page == PAGE_VOLUME && volumeFresh(now)) ||
                    ((page == PAGE_SHELLY || page == PAGE_WLED) &&
                     settings.wifiMode != WIFI_MODE_OFF &&
                     (shellyWifiOk() || shellyCompanionMode()));

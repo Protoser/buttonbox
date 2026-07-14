@@ -5,9 +5,15 @@
 #include "config.h"
 
 // Special (non-HID) chord outputs, >= 32 so they never collide with a gamepad bit.
-// A chord with this output opens the on-screen brightness overlay instead of
-// pressing a button (see updateChords / ui uiBrightnessChord).
+// A chord with this output runs a UI action instead of pressing a button (see
+// updateChords / ui uiBrightnessChord / uiOpenVolume).
 static constexpr uint8_t CHORD_OUT_BRIGHT = 32;
+static constexpr uint8_t CHORD_OUT_VOLUME = 33;
+
+// A chord member is a bit in Chord.members. Bits 0..NUM_HID-1 are the physical HID
+// buttons; bit NUM_HID additionally lets the dedicated menu/toggle button take part
+// in a chord (it has no HID identity of its own, so it's never emitted as a button).
+static constexpr uint8_t CHORD_MEMBER_TOGGLE = NUM_HID;   // bit 14
 
 struct Chord {
   uint32_t members;   // bitmask over physical HID indices (bits 0..NUM_HID-1)
@@ -28,3 +34,4 @@ uint8_t firstFreeOutput();
 void    updateChords(uint32_t now);          // HID engine, call on HOME
 void    resetChordEngine();                  // release everything, call when leaving HOME
 int8_t  activeChordOutput();                 // HID index of active chord output, or -1
+bool    chordToggleHeld();                   // true while the menu button is consumed by a chord

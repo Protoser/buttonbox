@@ -18,6 +18,7 @@ import flight
 import media
 import sensors
 import shelly_poll
+import volume_audio
 import wled_poll
 
 VID_ESP32S3 = 0x303A
@@ -89,6 +90,14 @@ class DeviceLink(QThread):
         self._flight_ts: float = 0.0
         self._flight_lock = threading.Lock()
 
+        # Windows volume mixer, produced by _volume_loop (pycaw COM calls stay off the
+        # serial thread). Control requests arrive from the box as "volset ..." lines and
+        # run on that loop. Absent pycaw -> _mixer is None and nothing is streamed.
+        self._volume: dict = {"master": 0, "apps": []}
+        self._volume_lock = threading.Lock()
+        self._volume_cmds: queue.Queue = queue.Queue()
+        self._mixer = volume_audio.Mixer() if volume_audio.available() else None
+
         # FlyByWire MCDU mirror. The QWebSocket lives in the GUI (McduPane); it pushes
         # the flattened 14-row screen here via set_mcdu(). The serial loop heartbeats
         # "mcdu act:" and sends only the rows that changed (tracked in _mcdu_dirty).
@@ -103,6 +112,22 @@ class DeviceLink(QThread):
     def set_setting(self, k, v): self.send(f"set {k}:{v}")
     def add_chord(self, mask, out): self.send(f"chord add {int(mask)}:{int(out)}")
     def del_chord(self, i):     self.send(f"chord del {int(i)}")
+
+    def _queue_volset(self, arg):
+        """Parse a box 'volset <who>:<pct>' request ('master' or an app index) onto the
+        volume queue; _volume_loop applies it off the serial thread."""
+        try:
+            who, val = arg.split(":", 1)
+            pct = int(val)
+        except ValueError:
+            return
+        target = "master" if who == "master" else None
+        if target is None:
+            try:
+                target = int(who)
+            except ValueError:
+                return
+        self._volume_cmds.put((target, pct))
     def flash(self):
         self.send("flash")
         self._reconnect_after = time.time() + 35   # pause scan while esptool uploads
@@ -223,6 +248,33 @@ class DeviceLink(QThread):
                     self._music = vals
             time.sleep(1.0)
 
+    def _volume_loop(self):
+        """Background thread: apply queued volume changes, then re-read the Windows
+        mixer and cache it. pycaw/comtypes COM calls live here so the serial loop only
+        reads the cached dict. Returns immediately (thread exits) if pycaw is absent."""
+        if self._mixer is None:
+            return
+        try:
+            import comtypes
+            comtypes.CoInitialize()
+        except Exception:                       # noqa: BLE001
+            pass
+        while self._running:
+            try:
+                while True:
+                    target, pct = self._volume_cmds.get_nowait()
+                    if target == "master":
+                        self._mixer.set_master(pct)
+                    else:
+                        self._mixer.set_app(target, pct)
+            except queue.Empty:
+                pass
+            st = self._mixer.read()
+            if st is not None:
+                with self._volume_lock:
+                    self._volume = {"master": st[0], "apps": st[1]}
+            time.sleep(0.7)
+
     def _beamng_loop(self):
         """Background thread: own the OutGauge UDP socket, block for the latest
         packet and cache it with a timestamp. The blocking recv stays off the
@@ -292,6 +344,9 @@ class DeviceLink(QThread):
         sensor_thread.start()
         music_thread = threading.Thread(target=self._music_loop, daemon=True, name="music-read")
         music_thread.start()
+        if self._mixer is not None:
+            volume_thread = threading.Thread(target=self._volume_loop, daemon=True, name="volume-read")
+            volume_thread.start()
         beamng_thread = threading.Thread(target=self._beamng_loop, daemon=True, name="beamng-read")
         beamng_thread.start()
         flight_thread = threading.Thread(target=self._flight_loop, daemon=True, name="flight-read")
@@ -352,6 +407,16 @@ class DeviceLink(QThread):
                     with self._music_lock:
                         m = dict(self._music)
                     ser.write(f"music {m['state']} {m['title']}\n".encode())
+
+                    # Volume mixer: master + per-app levels for the Volume page. Only
+                    # sent when pycaw is present, so the box shows "No companion" if not.
+                    if self._mixer is not None:
+                        with self._volume_lock:
+                            v = dict(self._volume)
+                        vapps = v.get("apps", [])
+                        ser.write(f"vol {int(v.get('master', 0))}:{len(vapps)}\n".encode())
+                        for i, (nm, vol) in enumerate(vapps):
+                            ser.write(f"vapp {i}:{int(vol)}:{nm}\n".encode())
 
                     # Clock sync for the header clock (box has no RTC): UTC epoch + local
                     # offset. Sent on connect then hourly -- the box keeps ticking on its
@@ -435,6 +500,10 @@ class DeviceLink(QThread):
                         self._wled_event.set()
                     elif line.startswith("mctl "):
                         self._music_cmds.put(line[5:].strip())
+                    elif line.startswith("volset "):
+                        self._queue_volset(line[7:].strip())
+                    elif line == "volget":
+                        pass                      # streamed on the next slow tick (<= interval)
                     elif line.startswith("mcdukey "):
                         try:
                             self.mcduKey.emit(int(line[8:].strip()))

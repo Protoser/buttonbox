@@ -5,6 +5,7 @@
 #include "shelly.h"
 #include "music.h"
 #include "wled.h"
+#include "volume.h"
 #include "beamng.h"
 #include "flight.h"
 #include "mcdu.h"
@@ -170,7 +171,7 @@ static void handleChord(char *args) {
     uint32_t mask = (uint32_t)strtoul(p, nullptr, 10);
     uint8_t  out  = (uint8_t)atoi(colon + 1);
     if (__builtin_popcount(mask) >= 2 && chordCount < MAX_CHORDS && out >= NUM_HID &&
-        (out < 32 || out == CHORD_OUT_BRIGHT)) {
+        (out < 32 || out == CHORD_OUT_BRIGHT || out == CHORD_OUT_VOLUME)) {
       chords[chordCount].members = mask;
       chords[chordCount].output  = out;
       chordCount++;
@@ -195,6 +196,8 @@ static void dispatch(char *line, uint32_t now) {
   else if (!strncmp(line, "shelly ", 7))  shellyApplyFromCompanion(line + 7);
   else if (!strncmp(line, "wled ", 5))    wledApplyFromCompanion(line + 5);
   else if (!strncmp(line, "music ", 6))   musicApply(line + 6, now);
+  else if (!strncmp(line, "vol ", 4))     volumeApplyHeader(line + 4, now);
+  else if (!strncmp(line, "vapp ", 5))    volumeApplyApp(line + 5, now);
   else if (!strncmp(line, "beamng ", 7))  beamngApply(line + 7, now);
   else if (!strncmp(line, "flight ", 7))  flightApply(line + 7, now);
   else if (!strncmp(line, "mcdu ", 5))    mcduApply(line + 5, now);

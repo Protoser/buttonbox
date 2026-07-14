@@ -65,11 +65,16 @@ void resetChordEngine() {
   emittedMask = 0; chordOwnedMask = 0; pendingMask = 0; activeChord = -1;
 }
 
+bool chordToggleHeld() { return (chordOwnedMask & (1u << CHORD_MEMBER_TOGGLE)) != 0; }
+
 void updateChords(uint32_t now) {
   uint32_t physMask = 0;
   for (uint8_t i = 0; i < NUM_HID; i++) {
     if (hidHeld(i)) { physMask |= (1u << i); if (pressedEdge(physBtn(i))) downTime[i] = now; }
   }
+  // The menu/toggle button can be a chord member (bit CHORD_MEMBER_TOGGLE). It has no
+  // HID identity, so it only ever joins a chord — never emits a button on its own.
+  if (toggleBtn.pressed) physMask |= (1u << CHORD_MEMBER_TOGGLE);
 
   // Best matching chord: members fully held, most members wins (tie -> lowest).
   int8_t best = -1; uint8_t bestCount = 0;
@@ -89,8 +94,10 @@ void updateChords(uint32_t now) {
     for (uint8_t i = 0; i < NUM_HID; i++)
       if ((chords[best].members & (1u << i)) && (emittedMask & (1u << i))) { gamepad.releaseButton(i); emittedMask &= ~(1u << i); }
     if (activeChord >= 0 && !outIsSpecial(chords[activeChord].output)) gamepad.releaseButton(chords[activeChord].output);
-    if (outIsSpecial(chords[best].output)) uiBrightnessChord(now);   // fire the UI action once, on activation
-    else                                   gamepad.pressButton(chords[best].output);
+    // Special outputs run a UI action once, on activation; normal ones press a button.
+    if      (chords[best].output == CHORD_OUT_BRIGHT) uiBrightnessChord(now);
+    else if (chords[best].output == CHORD_OUT_VOLUME) uiOpenVolume(now);
+    else                                              gamepad.pressButton(chords[best].output);
     activeChord = best; chordOwnedMask |= chords[best].members;
     pendingMask &= ~chords[best].members;   // members joined a chord -> no deferred solo tap
   }
@@ -118,4 +125,8 @@ void updateChords(uint32_t now) {
     }
     if (!(emittedMask & bit)) { pendingMask &= ~bit; chordOwnedMask &= ~bit; }
   }
+
+  // The toggle member bit isn't covered by the 0..NUM_HID-1 loop above; release its
+  // ownership once the menu button is up (this is what un-suppresses the menu action).
+  if (!(physMask & (1u << CHORD_MEMBER_TOGGLE))) chordOwnedMask &= ~(1u << CHORD_MEMBER_TOGGLE);
 }

@@ -33,13 +33,27 @@ try:
 except Exception:
     pass
 
+# pycaw + comtypes (Volume page). comtypes generates COM wrappers at runtime, so pull
+# the whole packages in when installed; skip cleanly if not (Volume shows "No companion").
+v_datas, v_bins, v_hidden = [], [], []
+try:
+    from PyInstaller.utils.hooks import collect_all
+    for _pkg in ("pycaw", "comtypes"):
+        try:
+            _d, _b, _h = collect_all(_pkg)
+            v_datas += _d; v_bins += _b; v_hidden += _h
+        except Exception:
+            pass
+except Exception:
+    pass
+
 a = Analysis(
     ["app.py"],
     pathex=[here],
-    binaries=w_bins + s_bins,
-    datas=dll_datas + w_datas + s_datas,
+    binaries=w_bins + s_bins + v_bins,
+    datas=dll_datas + w_datas + s_datas + v_datas,
     hiddenimports=["psutil", "serial.tools.list_ports", "PySide6.QtWebSockets",
-                   "PySide6.QtNetwork"] + w_hidden + s_hidden,
+                   "PySide6.QtNetwork"] + w_hidden + s_hidden + v_hidden,
     hookspath=[],
     runtime_hooks=[],
     excludes=[],

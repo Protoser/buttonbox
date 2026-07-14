@@ -31,6 +31,8 @@ MCDU_WS_URL = "ws://localhost:8380/interfaces/v1/mcdu"   # FlyByWire SimBridge r
 NUM_HID = 14            # physical buttons, shown 1..14
 OUT_MIN, OUT_MAX = 14, 31     # chord outputs (shown 15..32)
 OUT_BRIGHT = 32         # special chord output: open the backlight-brightness overlay (mirror chords.h CHORD_OUT_BRIGHT)
+OUT_VOLUME = 33         # special chord output: open the volume mixer page (mirror chords.h CHORD_OUT_VOLUME)
+TOGGLE_BIT = NUM_HID    # chord-member bit for the menu/toggle button (mirror chords.h CHORD_MEMBER_TOGGLE)
 MAX_CHORDS = 18
 IDLE_OPTS  = [(0, "Off"), (30, "30 s"), (120, "2 min")]
 CHORD_OPTS = [30, 40, 60, 80]
@@ -101,7 +103,10 @@ def make_icon():
 
 
 def members_str(mask):
-    return "+".join(str(i + 1) for i in range(NUM_HID) if mask & (1 << i)) or "(none)"
+    parts = [str(i + 1) for i in range(NUM_HID) if mask & (1 << i)]
+    if mask & (1 << TOGGLE_BIT):
+        parts.append("Menu")
+    return "+".join(parts) or "(none)"
 
 
 def pane_title(text):
@@ -412,6 +417,11 @@ class ChordsPane(SettingsPane):
             cb = QCheckBox(str(i + 1))
             self.member_cbs.append(cb)
             grid.addWidget(cb, i // 7, i % 7)
+        # The menu/toggle button can also be a chord member (bit TOGGLE_BIT). Its
+        # checkbox index in member_cbs must be TOGGLE_BIT so _add's bit math lines up.
+        menu_cb = QCheckBox("Menu")
+        self.member_cbs.append(menu_cb)
+        grid.addWidget(menu_cb, NUM_HID // 7, NUM_HID % 7)
         bl.addLayout(grid)
         row = QHBoxLayout()
         row.addWidget(QLabel("Output:"))
@@ -419,6 +429,7 @@ class ChordsPane(SettingsPane):
         for o in range(OUT_MIN, OUT_MAX + 1):
             self.out.addItem(f"Button {o + 1}", o)
         self.out.addItem("Brightness overlay", OUT_BRIGHT)   # special: opens the on-screen dimmer
+        self.out.addItem("Volume mixer", OUT_VOLUME)         # special: opens the volume page
         row.addWidget(self.out)
         addbtn = QPushButton("Add")
         addbtn.clicked.connect(self._add)
@@ -440,7 +451,9 @@ class ChordsPane(SettingsPane):
         self.chords = chords
         self.list.clear()
         for c in chords:
-            out = "Brightness overlay" if c["output"] == OUT_BRIGHT else f"Button {c['output'] + 1}"
+            if   c["output"] == OUT_BRIGHT: out = "Brightness overlay"
+            elif c["output"] == OUT_VOLUME: out = "Volume mixer"
+            else:                           out = f"Button {c['output'] + 1}"
             self.list.addItem(f"#{c['index']}   {members_str(c['members'])}  →  {out}")
         used = {c["output"] for c in chords}
         free = next((o for o in range(OUT_MIN, OUT_MAX + 1) if o not in used), OUT_MIN)

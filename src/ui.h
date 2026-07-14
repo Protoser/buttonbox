@@ -6,7 +6,7 @@ enum Page : uint8_t {
   PAGE_LAUNCHER, PAGE_BUTTONS, PAGE_MENU, PAGE_SETTINGS, PAGE_BTNTEST, PAGE_TIMER,
   PAGE_LAPLIST, PAGE_CHORDS, PAGE_CHORD_CAPTURE, PAGE_CHORD_OUTPUT, PAGE_CHORD_EDIT,
   PAGE_DASH, PAGE_PCSTATS, PAGE_SHELLY, PAGE_MUSIC, PAGE_WLED, PAGE_APPORDER,
-  PAGE_BEAMNG, PAGE_FLIGHT, PAGE_MCDU, PAGE_MCDUMAP, PAGE_MCDUMAP_SET, PAGE_CDTIMER
+  PAGE_BEAMNG, PAGE_FLIGHT, PAGE_MCDU, PAGE_MCDUMAP, PAGE_MCDUMAP_SET, PAGE_CDTIMER, PAGE_VOLUME
 };
 
 void uiBegin();                       // display init + apply saved orientation
@@ -21,6 +21,7 @@ void uiTickCountdown(uint32_t now);   // countdown timer: expiry pop-up + hold g
 void uiHandleWledBright(uint32_t now); // WLED Bright focus: hold Up/Down to scroll, send on release
 void uiBrightnessChord(uint32_t now);  // open/extend the backlight-brightness overlay (from a chord)
 bool uiHandleBrightness(uint32_t now); // drive the overlay; returns true while it owns the nav buttons
+void uiOpenVolume(uint32_t now);       // open the volume-mixer page (from a chord)
 // The display is rendered by a dedicated task on core 0 (started in uiBegin), so the
 // slow ST7920 flush never blocks the core-1 input loop. No per-loop display call.
 
