@@ -1916,7 +1916,11 @@ void uiHandleMenuButton(uint32_t now) {
   // member, not the menu key — swallow its tap/hold so it doesn't also switch apps.
   if (chordToggleHeld()) { menuHoldHandled = true; return; }
 
-  if (toggleBtn.pressed && !menuHoldHandled && page != PAGE_CHORD_CAPTURE &&
+  // Hold = quick-switch to the previous app — but not when the menu button is a chord
+  // member: then a deliberate hold-while-you-press-the-other-button must form the chord,
+  // so the quick-switch would fire first and steal it. Such users lose hold-to-switch.
+  bool menuInChord = (chordMemberMask & (1u << CHORD_MEMBER_TOGGLE)) != 0;
+  if (toggleBtn.pressed && !menuHoldHandled && !menuInChord && page != PAGE_CHORD_CAPTURE &&
       (now - menuHoldStart) >= MENU_HOLD_MS) {
     menuHoldHandled = true;
     Page   cur    = (page == PAGE_LAUNCHER) ? lastApp : page;   // app we're leaving
