@@ -6,7 +6,7 @@ enum Page : uint8_t {
   PAGE_LAUNCHER, PAGE_BUTTONS, PAGE_MENU, PAGE_SETTINGS, PAGE_BTNTEST, PAGE_TIMER,
   PAGE_LAPLIST, PAGE_CHORDS, PAGE_CHORD_CAPTURE, PAGE_CHORD_OUTPUT, PAGE_CHORD_EDIT,
   PAGE_DASH, PAGE_PCSTATS, PAGE_SHELLY, PAGE_MUSIC, PAGE_WLED, PAGE_APPORDER,
-  PAGE_BEAMNG, PAGE_FLIGHT, PAGE_MCDU, PAGE_MCDUMAP, PAGE_MCDUMAP_SET
+  PAGE_BEAMNG, PAGE_FLIGHT, PAGE_MCDU, PAGE_MCDUMAP, PAGE_MCDUMAP_SET, PAGE_CDTIMER
 };
 
 void uiBegin();                       // display init + apply saved orientation
@@ -17,6 +17,7 @@ void uiEnterFlash();                  // show "flash mode" + enter the bootloade
 void uiHandleMenuButton(uint32_t now); // menu/toggle button: tap=launcher, hold=quick-switch app
 void uiHandlePageInput();             // physical-button presses on a non-HOME page
 void uiHandleTimerLap(uint32_t now);  // Lap button: tap=record, hold=undo+open list
+void uiTickCountdown(uint32_t now);   // countdown timer: expiry pop-up + hold gestures (every loop)
 void uiHandleWledBright(uint32_t now); // WLED Bright focus: hold Up/Down to scroll, send on release
 void uiBrightnessChord(uint32_t now);  // open/extend the backlight-brightness overlay (from a chord)
 bool uiHandleBrightness(uint32_t now); // drive the overlay; returns true while it owns the nav buttons

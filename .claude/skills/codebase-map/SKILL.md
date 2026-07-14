@@ -87,10 +87,12 @@ input-routing behavior.
 | [settings.h](src/settings.h)/.cpp | NVS-persisted options via Preferences | orientation, label style, idle-blank, chord window, `bootSel` (boot screen). |
 | [display.h](src/display.h)/.cpp | The U8g2 ST7920 panel object | SW SPI on 17/18/21, rotated `U8G2_R2`. |
 | [ui.h](src/ui.h)/[ui.cpp](src/ui.cpp) | **All pages, nav, rendering** (~820 lines, biggest file) | Apps launcher + pages. `APPS[]` table drives the launcher grid. Page enum: `PAGE_LAUNCHER`, `PAGE_BUTTONS`, `PAGE_TIMER`, etc. Owns every `u8g2` draw call. |
-| [stopwatch.h](src/stopwatch.h)/.cpp | Lap timer logic | Background-running; ring of 30 laps. |
+| [stopwatch.h](src/stopwatch.h)/.cpp | Lap stopwatch logic ("Stopwch" app, PAGE_TIMER) | Background-running; ring of 30 laps. |
+| [countdown.h](src/countdown.h)/.cpp | Countdown timer logic ("Timer" app, PAGE_CDTIMER) | Background-running; expiry pops the page up + flashes (no buzzer); duration persisted via settings.timerSec. |
 | [hostlink.h](src/hostlink.h)/.cpp | Serial protocol parse/dispatch | See protocol section above. |
 | [pcstats.h](src/pcstats.h)/.cpp | PC-telemetry state + page (`pcStatsApply`) | Fed by `<key:value>` serial lines. |
 | [music.h](src/music.h)/.cpp | Now-playing state + Music page (`musicApply`) | Title is ASCII-sanitized PC-side; box emits `mctl`. *(new, untracked)* |
+| [beamng.h](src/beamng.h)/.cpp | BeamNG OutGauge telemetry state (`beamngApply`) | Fed by `beamng key:value` serial lines from `host/beamng.py`; learns the RPM-bar scale (`rpmMax`) from the shift light. Pages/views live in `ui.cpp`. |
 | [shelly.h](src/shelly.h)/.cpp | Shelly smart-switch integration | Largest non-UI module; WiFi-auto vs. companion-poll modes. **Owns the shared WiFi lifecycle** (connect/disconnect by `wifiMode`). |
 | [wled.h](src/wled.h)/.cpp | WLED LED-controller integration | Own task + state; **does not manage WiFi** — piggybacks on Shelly's. Toggle/brightness/preset via JSON; direct-WiFi or companion-routed (`wledcmd`). |
 | [clock.h](src/clock.h)/.cpp | Header wall-clock time (`clockApplyHost`/`clockGet`) | No RTC: synced by NTP (configTime, piggybacks Shelly's WiFi, hourly) or PC `time` line; ticks on the ESP32 system clock. TZ offset learned from the PC, persisted to NVS. |

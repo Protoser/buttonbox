@@ -37,6 +37,7 @@ struct BeamNGState {
   uint8_t  turboFlag;  // 1 = turbo gauge applies to this car
   uint32_t lights;     // OutGauge showLights bitfield (DL_*)
   uint32_t lastRx;     // millis() of last complete line (0 = never)
+  uint16_t rpmMax;     // learned RPM-bar scale (~redline); see beamng.cpp
 };
 extern BeamNGState beamng;
 

@@ -63,6 +63,7 @@ void loop() {
   updateChords(now);
 
   if (uiPage() == PAGE_TIMER)   uiHandleTimerLap(now);
+  uiTickCountdown(now);            // countdown timer: expiry pop-up (any page) + hold gestures
   uiHandleWledBright(now);         // self-gating; handles hold-to-scroll + release flush
   // The display renders on its own task pinned to core 0 (started in uiBegin) so the
   // slow ST7920 flush never blocks button sampling here on core 1.

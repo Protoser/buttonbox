@@ -5,6 +5,7 @@
 #include "buttons.h"
 #include "chords.h"
 #include "stopwatch.h"
+#include "countdown.h"
 #include "pcstats.h"
 #include "shelly.h"
 #include "music.h"
@@ -122,6 +123,7 @@ static void drawLauncher();
 // ----------------------------------------------------------------------------
 static void iconButtons(int cx, int cy);
 static void iconTimer(int cx, int cy);
+static void iconCdTimer(int cx, int cy);
 static void iconMenu(int cx, int cy);
 static void iconPc(int cx, int cy);
 static void iconShelly(int cx, int cy);
@@ -135,7 +137,7 @@ struct App { const char *name; void (*drawIcon)(int cx, int cy); Page page; };
 // New apps append here so existing persisted app indices (appOrder/appHidden) stay valid.
 static const App APPS[] = {
   {"Buttons", iconButtons, PAGE_BUTTONS},
-  {"Timer",   iconTimer,   PAGE_TIMER},
+  {"Stopwch", iconTimer,   PAGE_TIMER},
   {"PC",      iconPc,      PAGE_DASH},
   {"Shelly",  iconShelly,  PAGE_SHELLY},
   {"Music",   iconMusic,   PAGE_MUSIC},
@@ -144,6 +146,7 @@ static const App APPS[] = {
   {"BeamNG",  iconBeamng,  PAGE_BEAMNG},
   {"Flight",  iconFlight,  PAGE_FLIGHT},
   {"MCDU",    iconMcdu,    PAGE_MCDU},
+  {"Timer",   iconCdTimer, PAGE_CDTIMER},
 };
 static const uint8_t APP_COUNT = sizeof(APPS) / sizeof(APPS[0]);
 
@@ -196,6 +199,7 @@ static void enterBootloader() {
   // The render task owns the panel on core 0; stop it before we draw from core 1.
   if (displayTaskHandle) vTaskSuspend(displayTaskHandle);
   delay(50);                       // let an in-flight render finish so it can't overdraw us
+  displaySetBacklight(100);        // full brightness so the flash prompt is always clearly lit
   u8g2.setMaxClipWindow();         // a clipped page (PFD/Music) may have left a clip active
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_6x12_tr);
@@ -277,6 +281,26 @@ static void handleNav(uint8_t a) {
       else if (a == NAV_BACK)   { gotoPage(PAGE_LAUNCHER); return; }
       // NAV_DOWN (Lap): press = record split, hold = undo + open list — uiHandleTimerLap()
       break;
+
+    case PAGE_CDTIMER: {
+      uint32_t now = millis();
+      if (cdIsExpired()) {                       // ringing: any button dismisses
+        cdReset();
+        if (a == NAV_BACK) { gotoPage(PAGE_LAUNCHER); return; }
+        break;
+      }
+      if      (a == NAV_UP)     cdAdjust(now, +1);
+      else if (a == NAV_DOWN)   cdAdjust(now, -1);
+      else if (a == NAV_SELECT) {
+        cdToggle(now);                           // tap = start/pause; hold = reset (uiTickCountdown)
+        if (cdIsRunning() && settings.timerSec != cdDurationSec()) {
+          settings.timerSec = cdDurationSec();   // persist the duration once, on start
+          saveSettings();
+        }
+      }
+      else if (a == NAV_BACK)   { gotoPage(PAGE_LAUNCHER); return; }   // keeps running in background
+      break;
+    }
 
     case PAGE_LAPLIST: {
       uint8_t n = swLapsAvailable();
@@ -588,7 +612,7 @@ static void fmtTime(uint32_t ms, char *buf, size_t n) {
 
 static void drawTimer() {
   uint32_t e = swElapsed(millis());
-  drawListHeader("TIMER");
+  drawListHeader("STOPWCH");
   char buf[16]; fmtTime(e, buf, sizeof(buf));
   u8g2.setFont(u8g2_font_10x20_tr);
   u8g2.drawStr(cL() + (110 - u8g2.getStrWidth(buf)) / 2, 40, buf);
@@ -601,6 +625,39 @@ static void drawTimer() {
   u8g2.drawStr(cL()+2, 58, l);
   NavHint th[4] = {{swIsRunning() ? H_PAUSE : H_PLAY, ""}, {H_TEXT, "L"}, {H_TEXT, "R"}, {H_LEFT, ""}};
   drawNavLegend(th);
+  u8g2.sendBuffer();
+}
+
+// Countdown timer: big remaining time (rounded up, like a kitchen timer), the set
+// duration alongside once they differ, and a full-column flash while ringing.
+static void drawCountdown() {
+  uint32_t now = millis();
+  drawListHeader("TIMER");
+  uint32_t rem = cdRemaining(now);
+  uint32_t s   = (rem + 999) / 1000;
+  char buf[8]; snprintf(buf, sizeof(buf), "%u:%02u", (unsigned)(s / 60), (unsigned)(s % 60));
+  u8g2.setFont(u8g2_font_10x20_tr);
+  u8g2.drawStr(cL() + (110 - u8g2.getStrWidth(buf)) / 2, 40, buf);
+
+  u8g2.setFont(u8g2_font_6x12_tr);
+  bool touched = rem != (uint32_t)cdDurationSec() * 1000;   // started / nudged off the set time
+  const char *st = cdIsExpired() ? "TIME UP!"
+                 : cdIsRunning() ? "running..."
+                 : touched       ? "paused" : "ready";
+  u8g2.drawStr(cL() + 2, 58, st);
+  if (touched && !cdIsExpired()) {
+    char sb[14];
+    snprintf(sb, sizeof(sb), "Set %u:%02u", cdDurationSec() / 60, cdDurationSec() % 60);
+    u8g2.drawStr(cR() - 2 - u8g2.getStrWidth(sb), 58, sb);
+  }
+  if (cdIsExpired() && ((now / 400) & 1)) {                 // ring: flash the content column
+    u8g2.setDrawColor(2);
+    u8g2.drawBox(cL(), 14, cR() - cL(), 50);
+    u8g2.setDrawColor(1);
+  }
+  NavHint idleH[4] = {{H_TEXT, "+"}, {H_TEXT, "-"}, {cdIsRunning() ? H_PAUSE : H_PLAY, ""}, {H_LEFT, ""}};
+  NavHint ringH[4] = {{H_NONE, ""}, {H_NONE, ""}, {H_TEXT, "OK"}, {H_LEFT, ""}};
+  drawNavLegend(cdIsExpired() ? ringH : idleH);
   u8g2.sendBuffer();
 }
 
@@ -705,6 +762,16 @@ static void iconTimer(int cx, int cy) {              // stopwatch
   u8g2.drawBox(cx - 2, cy - 11, 4, 3);               // top button
   u8g2.drawLine(cx, cy + 1, cx, cy - 4);             // minute hand
   u8g2.drawLine(cx, cy + 1, cx + 4, cy + 1);         // second hand
+}
+static void iconCdTimer(int cx, int cy) {            // hourglass
+  u8g2.drawHLine(cx - 6, cy - 9, 13);                // top plate
+  u8g2.drawHLine(cx - 6, cy + 9, 13);                // bottom plate
+  u8g2.drawLine(cx - 5, cy - 8, cx, cy);             // waist
+  u8g2.drawLine(cx + 5, cy - 8, cx, cy);
+  u8g2.drawLine(cx - 5, cy + 8, cx, cy);
+  u8g2.drawLine(cx + 5, cy + 8, cx, cy);
+  u8g2.drawDisc(cx, cy + 6, 2);                      // sand pile
+  u8g2.drawPixel(cx, cy + 2);                        // falling grain
 }
 static void iconMenu(int cx, int cy) {               // three bars (hamburger)
   u8g2.drawBox(cx - 8, cy - 6, 16, 2);
@@ -1134,12 +1201,10 @@ static void beamngGearStr(char *buf, size_t n) {
 }
 static const char *beamngUnitStr() { return beamng.unit ? "mph" : "km/h"; }
 
-// RPM bar scaled to the largest RPM seen this session — OutGauge carries no
-// redline, so the bar self-calibrates; DL_SHIFT is the real upshift cue and
-// lights the whole bar.
-static uint16_t beamngRpmMax = 6000;
+// RPM bar scaled to beamng.rpmMax — a redline estimate learned from the shift
+// light (see beamng.cpp), so it tracks the current car instead of the session
+// peak; DL_SHIFT is the real upshift cue and lights the whole bar.
 static void drawRpmBar(int x, int y, int w, int h, const char *txt = nullptr) {
-  if (beamng.rpm > beamngRpmMax) beamngRpmMax = beamng.rpm;
   u8g2.drawFrame(x, y, w, h);
   if (txt) {
     u8g2.setFont(u8g2_font_5x7_tr);
@@ -1147,7 +1212,7 @@ static void drawRpmBar(int x, int y, int w, int h, const char *txt = nullptr) {
   }
   int inner = w - 2;
   int fill = (beamng.lights & DL_SHIFT) ? inner
-           : (int)((long)beamng.rpm * inner / (beamngRpmMax ? beamngRpmMax : 1));
+           : (int)((long)beamng.rpm * inner / (beamng.rpmMax ? beamng.rpmMax : 1));
   if (fill > 0) {
     if (fill > inner) fill = inner;
     u8g2.setDrawColor(2);                      // XOR so any text inside stays readable
@@ -1709,6 +1774,7 @@ static void render() {
     case PAGE_SETTINGS:      drawList("SETTINGS", SETTINGS_ITEMS, SETTINGS_COUNT, true); break;
     case PAGE_BTNTEST:       drawBtnTest();                                              break;
     case PAGE_TIMER:         drawTimer();                                                break;
+    case PAGE_CDTIMER:       drawCountdown();                                            break;
     case PAGE_LAPLIST:       drawLapList();                                              break;
     case PAGE_CHORDS:        drawChords();                                               break;
     case PAGE_CHORD_CAPTURE: drawCapture();                                              break;
@@ -1734,6 +1800,7 @@ static void render() {
 void uiBegin() {
   displayBegin();
   applyOrientation();
+  cdSetDuration(settings.timerSec);   // countdown timer resumes its last-used duration
   uint8_t bs = (settings.bootSel > APP_COUNT) ? 0 : settings.bootSel;   // 0 = launcher, else app
   page = (bs == 0) ? PAGE_LAUNCHER : APPS[bs - 1].page;
   if (page != PAGE_LAUNCHER) { lastApp = page; lastAppSel = 0; }        // so menu btn resumes it
@@ -1830,6 +1897,44 @@ void uiHandleTimerLap(uint32_t now) {
   }
 }
 
+// Countdown timer, every loop: expiry pops the Timer page up (the box has no
+// buzzer, so the flashing screen IS the alarm); on the page, holding Select
+// resets and holding +/- auto-repeats the adjustment.
+static const uint16_t CD_HOLD_MS   = 500;   // Select hold -> reset; +/- hold -> repeat starts
+static const uint16_t CD_REPEAT_MS = 150;
+static uint32_t cdSelHoldStart = 0;
+static bool     cdSelHoldDone  = false;
+static uint32_t cdRepeatAt     = 0;
+void uiTickCountdown(uint32_t now) {
+  if (cdService(now)) {                          // just expired: surface + wake the display
+    if (page != PAGE_CDTIMER) gotoPage(PAGE_CDTIMER);
+    uiNoteActivity(now);
+  }
+  if (page != PAGE_CDTIMER) return;
+
+  Button &selB = navBtns[NUM_NAV - 1 - NAV_SELECT];
+  if (pressedEdge(selB)) { cdSelHoldStart = now; cdSelHoldDone = false; }
+  if (selB.pressed && !cdSelHoldDone && (now - cdSelHoldStart) >= CD_HOLD_MS) {
+    cdReset();                                   // overrides the tap's start/pause
+    cdSelHoldDone = true;
+    displayDirty  = true;
+  }
+
+  Button &up   = navBtns[NUM_NAV - 1 - NAV_UP];
+  Button &down = navBtns[NUM_NAV - 1 - NAV_DOWN];
+  int8_t dir = 0;
+  if      (up.pressed && !down.pressed) dir = +1;
+  else if (down.pressed && !up.pressed) dir = -1;
+  if (dir != 0) {
+    if (pressedEdge(dir > 0 ? up : down)) cdRepeatAt = now + CD_HOLD_MS;  // first step came via handleNav
+    else if ((int32_t)(now - cdRepeatAt) >= 0) {
+      cdAdjust(now, dir);
+      cdRepeatAt = now + CD_REPEAT_MS;
+      uiNoteActivity(now);
+    }
+  }
+}
+
 // WLED brightness is adjusted by holding Up/Down while "Bright" is focused: the
 // value scrolls locally every WLED_BRI_REPEAT_MS and is sent to the device only
 // once, on release. Self-gating, so it can be called every loop; leaving the page
@@ -1916,6 +2021,7 @@ static void displayService() {
   if (orientDirty) { orientDirty = false; applyOrientation(); displayDirty = true; }
 
   bool keepAwake = (page == PAGE_TIMER && swIsRunning()) ||
+                   (page == PAGE_CDTIMER && (cdIsRunning() || cdIsExpired())) ||
                    (page == PAGE_DASH && pcStatsFresh(now)) ||
                    (page == PAGE_MUSIC && musicFresh(now)) ||
                    (page == PAGE_BEAMNG && beamngFresh(now)) ||

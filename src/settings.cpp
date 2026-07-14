@@ -34,6 +34,7 @@ void loadSettings() {
       memcpy(settings.mcduMap, mdef, MCDU_MAP_N); }
   settings.flightUnits = p.getUChar("funits", 0);
   settings.engStyle    = p.getUChar("engsty", 0);
+  settings.timerSec    = p.getUShort("timersec", 300);
   settings.brightFull  = p.getUChar("brfull", 100);
   settings.brightIdle  = p.getUChar("bridle", 20);
   settings.dimIdleSec  = p.getUShort("dimidle", 15);
@@ -55,6 +56,7 @@ void saveSettings() {
   p.putBytes("mcdumap", settings.mcduMap, MCDU_MAP_N);
   p.putUChar("funits", settings.flightUnits);
   p.putUChar("engsty", settings.engStyle);
+  p.putUShort("timersec", settings.timerSec);
   p.putUChar("brfull", settings.brightFull);
   p.putUChar("bridle", settings.brightIdle);
   p.putUShort("dimidle", settings.dimIdleSec);
