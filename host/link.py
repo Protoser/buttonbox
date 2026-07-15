@@ -96,6 +96,7 @@ class DeviceLink(QThread):
         self._volume: dict = {"master": 0, "apps": []}
         self._volume_lock = threading.Lock()
         self._volume_cmds: queue.Queue = queue.Queue()
+        self._volume_gen = 0   # bumped on every box change; stale reads are discarded
         self._mixer = volume_audio.Mixer() if volume_audio.available() else None
 
         # FlyByWire MCDU mirror. The QWebSocket lives in the GUI (McduPane); it pushes
@@ -132,6 +133,7 @@ class DeviceLink(QThread):
         # change instead of the stale pre-change value — otherwise the box's level
         # visibly snaps back until _volume_loop has applied + re-read the mixer (~0.7 s).
         with self._volume_lock:
+            self._volume_gen += 1
             if target == "master":
                 self._volume["master"] = pct
             else:
@@ -280,10 +282,15 @@ class DeviceLink(QThread):
                         self._mixer.set_app(target, pct)
             except queue.Empty:
                 pass
+            with self._volume_lock:
+                gen = self._volume_gen
             st = self._mixer.read()
             if st is not None:
                 with self._volume_lock:
-                    self._volume = {"master": st[0], "apps": st[1]}
+                    # A box change that landed while we were reading makes this snapshot
+                    # stale — caching it would briefly snap the box back to the old level.
+                    if self._volume_gen == gen:
+                        self._volume = {"master": st[0], "apps": st[1]}
             time.sleep(0.7)
 
     def _beamng_loop(self):
