@@ -91,7 +91,10 @@ static bool     lapHoldHandled   = false;
 static bool     lapRecordedPress = false;
 
 // Menu button: tap = launcher/resume, hold = quick-switch to the previous app.
-static const uint16_t MENU_HOLD_MS = 400;
+// When the menu button is a chord member the hold threshold is longer, so a chord
+// partner pressed within this window forms the chord before the switch fires.
+static const uint16_t MENU_HOLD_MS       = 400;
+static const uint16_t MENU_HOLD_CHORD_MS = 500;
 static uint32_t menuHoldStart   = 0;
 static bool     menuHoldHandled = false;
 
@@ -1916,12 +1919,14 @@ void uiHandleMenuButton(uint32_t now) {
   // member, not the menu key — swallow its tap/hold so it doesn't also switch apps.
   if (chordToggleHeld()) { menuHoldHandled = true; return; }
 
-  // Hold = quick-switch to the previous app — but not when the menu button is a chord
-  // member: then a deliberate hold-while-you-press-the-other-button must form the chord,
-  // so the quick-switch would fire first and steal it. Such users lose hold-to-switch.
+  // Hold = quick-switch to the previous app. When the menu button is a chord member,
+  // wait a bit longer (MENU_HOLD_CHORD_MS) so a chord partner pressed inside that
+  // window forms the chord first (the guard above then swallows the menu button);
+  // held alone past the window, the quick-switch still fires as usual.
   bool menuInChord = (chordMemberMask & (1u << CHORD_MEMBER_TOGGLE)) != 0;
-  if (toggleBtn.pressed && !menuHoldHandled && !menuInChord && page != PAGE_CHORD_CAPTURE &&
-      (now - menuHoldStart) >= MENU_HOLD_MS) {
+  uint16_t holdMs  = menuInChord ? MENU_HOLD_CHORD_MS : MENU_HOLD_MS;
+  if (toggleBtn.pressed && !menuHoldHandled && page != PAGE_CHORD_CAPTURE &&
+      (now - menuHoldStart) >= holdMs) {
     menuHoldHandled = true;
     Page   cur    = (page == PAGE_LAUNCHER) ? lastApp : page;   // app we're leaving
     int8_t curSel = (page == PAGE_LAUNCHER) ? lastAppSel : sel;
