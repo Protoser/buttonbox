@@ -1,6 +1,7 @@
 #include "display.h"
 #include "config.h"
 #include <math.h>
+#include "driver/gpio.h"   // gpio_hold_en/dis: latch the backlight pin through a reboot
 
 // ST7920 in software SPI: clock=E, data=R/W, cs=RS. Rotation is applied from
 // saved settings via ui's applyOrientation(); the constructor value is a default.
@@ -25,7 +26,19 @@ void displaySetBacklight(uint8_t pct) {
   ledcWrite(BL_CHANNEL, duty);
 }
 
+// Flash Mode: once the chip reboots into the ROM bootloader the LEDC PWM stops and
+// the backlight pin floats -> screen goes dark while flashing. Drive the pin solid
+// high and latch it with the pad-hold (RTC-domain, survives a software reset) so the
+// "run upload now" prompt stays lit. displayBegin() releases the hold on next boot.
+void displayBacklightHoldFull() {
+  ledcDetachPin(LCD_BACKLIGHT_PIN);
+  pinMode(LCD_BACKLIGHT_PIN, OUTPUT);
+  digitalWrite(LCD_BACKLIGHT_PIN, HIGH);
+  gpio_hold_en((gpio_num_t)LCD_BACKLIGHT_PIN);
+}
+
 void displayBegin() {
+  gpio_hold_dis((gpio_num_t)LCD_BACKLIGHT_PIN);   // release a Flash-Mode hold from last boot
   u8g2.begin();
   ledcSetup(BL_CHANNEL, BL_FREQ_HZ, BL_RES_BITS);
   ledcAttachPin(LCD_BACKLIGHT_PIN, BL_CHANNEL);

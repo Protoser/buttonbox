@@ -210,7 +210,7 @@ static void enterBootloader() {
   // The render task owns the panel on core 0; stop it before we draw from core 1.
   if (displayTaskHandle) vTaskSuspend(displayTaskHandle);
   delay(50);                       // let an in-flight render finish so it can't overdraw us
-  displaySetBacklight(100);        // full brightness so the flash prompt is always clearly lit
+  displayBacklightHoldFull();      // solid-on + pad hold: stays lit through the reboot into the bootloader
   u8g2.setMaxClipWindow();         // a clipped page (PFD/Music) may have left a clip active
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_6x12_tr);
