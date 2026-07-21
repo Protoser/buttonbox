@@ -60,8 +60,8 @@ static inline bool brightOvlActive(uint32_t now) { return (int32_t)(brightOvlUnt
 static bool volAdjust = false;
 static const uint8_t VOL_STEP = 5;
 
-static const char *MENU_ITEMS[]     = {"Button Test", "Chords", "Settings", "App Order", "MCDU Keys", "Flash Mode", "Back"};
-static const uint8_t MENU_COUNT     = 7;
+static const char *MENU_ITEMS[]     = {"Button Test", "Chords", "Settings", "App Order", "MCDU Keys", "Key Binds", "Flash Mode", "Back"};
+static const uint8_t MENU_COUNT     = 8;
 static const char *SETTINGS_ITEMS[] = {"Rotate", "Labels", "Idle blank", "Brightness", "Idle bright",
                                        "Auto-dim", "Chord", "Boot", "WiFi", "Back"};
 static const uint8_t SETTINGS_COUNT = 10;
@@ -76,6 +76,40 @@ static uint8_t testLastGpio = 0;
 
 // MCDU key map editor: which physical button (HID index) the output picker is editing.
 static uint8_t mcduEditBtn  = 0;
+
+// Keyboard-binding editor: which output the key picker is editing, and whether the Key
+// row is in scroll-adjust mode (Up/Down change the key instead of moving the cursor).
+static uint8_t keyEditOut = 0;
+static bool    keyAdjust  = false;
+
+// Curated key choices for the on-device picker (label + HID usage, Keyboard/Keypad page
+// 0x07). The box stores the usage, not the table index, so the companion's richer list can
+// differ. Index 0 = unbound. Keep the common ones (F13-F24 first — the safe phantom keys).
+struct KeyChoice { const char *label; uint8_t usage; };
+static const KeyChoice KEY_TABLE[] = {
+  {"None", 0x00},
+  {"F13", 0x68}, {"F14", 0x69}, {"F15", 0x6A}, {"F16", 0x6B}, {"F17", 0x6C}, {"F18", 0x6D},
+  {"F19", 0x6E}, {"F20", 0x6F}, {"F21", 0x70}, {"F22", 0x71}, {"F23", 0x72}, {"F24", 0x73},
+  {"F1", 0x3A}, {"F2", 0x3B}, {"F3", 0x3C}, {"F4", 0x3D}, {"F5", 0x3E}, {"F6", 0x3F},
+  {"F7", 0x40}, {"F8", 0x41}, {"F9", 0x42}, {"F10", 0x43}, {"F11", 0x44}, {"F12", 0x45},
+  {"A", 0x04}, {"B", 0x05}, {"C", 0x06}, {"D", 0x07}, {"E", 0x08}, {"F", 0x09}, {"G", 0x0A},
+  {"H", 0x0B}, {"I", 0x0C}, {"J", 0x0D}, {"K", 0x0E}, {"L", 0x0F}, {"M", 0x10}, {"N", 0x11},
+  {"O", 0x12}, {"P", 0x13}, {"Q", 0x14}, {"R", 0x15}, {"S", 0x16}, {"T", 0x17}, {"U", 0x18},
+  {"V", 0x19}, {"W", 0x1A}, {"X", 0x1B}, {"Y", 0x1C}, {"Z", 0x1D},
+  {"1", 0x1E}, {"2", 0x1F}, {"3", 0x20}, {"4", 0x21}, {"5", 0x22},
+  {"6", 0x23}, {"7", 0x24}, {"8", 0x25}, {"9", 0x26}, {"0", 0x27},
+  {"Enter", 0x28}, {"Esc", 0x29}, {"Bksp", 0x2A}, {"Tab", 0x2B}, {"Space", 0x2C},
+  {"Ins", 0x49}, {"Del", 0x4C}, {"Home", 0x4A}, {"End", 0x4D}, {"PgUp", 0x4B}, {"PgDn", 0x4E},
+  {"Right", 0x4F}, {"Left", 0x50}, {"Down", 0x51}, {"Up", 0x52},
+};
+static const uint8_t KEY_TABLE_N = sizeof(KEY_TABLE) / sizeof(KEY_TABLE[0]);
+static const char *MOD_LABELS[4] = {"Ctrl", "Shift", "Alt", "Gui"};   // rows 0..3, bits KM_CTRL..KM_GUI
+
+static uint8_t keyTableIndex(uint8_t usage) {
+  for (uint8_t i = 0; i < KEY_TABLE_N; i++) if (KEY_TABLE[i].usage == usage) return i;
+  return 0;   // unknown usage -> show as "None"
+}
+static const char *keyUsageLabel(uint8_t usage) { return KEY_TABLE[keyTableIndex(usage)].label; }
 
 // Chord editor scratch
 static uint32_t captureMask    = 0;
@@ -225,9 +259,10 @@ static void gotoPage(Page p) {
   if (page != PAGE_LAUNCHER && p == PAGE_LAUNCHER) { lastApp = page; lastAppSel = sel; }  // remember on minimize
   // Capture/Button-Test grab every button, so clear any HID currently held by
   // the engine on entry (other pages keep the non-nav buttons live).
-  if (p == PAGE_CHORD_CAPTURE || p == PAGE_BTNTEST || p == PAGE_MCDUMAP) resetChordEngine();
+  if (p == PAGE_CHORD_CAPTURE || p == PAGE_BTNTEST || p == PAGE_MCDUMAP || p == PAGE_KEYMAP) resetChordEngine();
   if (p == PAGE_CHORD_CAPTURE) captureMask = 0;
   if (p == PAGE_BTNTEST)       testLastHid = -1;
+  if (p == PAGE_KEYMAP_SET)    keyAdjust = false;
   page = p; sel = 0; displayDirty = true;
 }
 
@@ -263,8 +298,9 @@ static void handleNav(uint8_t a) {
         case 2: gotoPage(PAGE_SETTINGS); return;
         case 3: normalizeAppOrder(); appGrab = false; gotoPage(PAGE_APPORDER); return;
         case 4: gotoPage(PAGE_MCDUMAP);  return;
-        case 5: enterBootloader();       return;
-        case 6: gotoPage(PAGE_LAUNCHER); return;
+        case 5: gotoPage(PAGE_KEYMAP);   return;
+        case 6: enterBootloader();       return;
+        case 7: gotoPage(PAGE_LAUNCHER); return;
       }
       break;
 
@@ -490,6 +526,30 @@ static void handleNav(uint8_t a) {
       }
       break;
 
+    // PAGE_KEYMAP is a press-capture page (grabs every button in uiHandlePageInput),
+    // like PAGE_MCDUMAP, so it has no nav handling here — only its editor does.
+    case PAGE_KEYMAP_SET: {
+      // Rows 0..3 = Ctrl/Shift/Alt/Gui toggles, row 4 = the bound key. On the key row,
+      // Select enters scroll-adjust: Up/Down change the key, Select/Back commit (mirrors
+      // the Volume page's adjust mode).
+      const uint8_t KEY_ROW = 4;
+      if (keyAdjust) {
+        uint8_t ti = keyTableIndex(settings.keyKey[keyEditOut]);
+        if      (a == NAV_UP)   { if (ti > 0) ti--;               settings.keyKey[keyEditOut] = KEY_TABLE[ti].usage; saveSettings(); }
+        else if (a == NAV_DOWN) { if (ti < KEY_TABLE_N - 1) ti++; settings.keyKey[keyEditOut] = KEY_TABLE[ti].usage; saveSettings(); }
+        else                    { keyAdjust = false; }   // Select or Back leaves adjust mode
+        break;
+      }
+      if      (a == NAV_UP)     { if (sel > 0) sel--; }
+      else if (a == NAV_DOWN)   { if (sel < KEY_ROW) sel++; }
+      else if (a == NAV_BACK)   { gotoPage(PAGE_KEYMAP); sel = 0; return; }
+      else if (a == NAV_SELECT) {
+        if (sel < KEY_ROW) { settings.keyMod[keyEditOut] ^= (uint8_t)(1u << sel); saveSettings(); }
+        else               { keyAdjust = true; }
+      }
+      break;
+    }
+
     default: break;
   }
   displayDirty = true;
@@ -502,13 +562,13 @@ static void handleNav(uint8_t a) {
 static uint8_t cL() { return settings.flipped ? 0 : 18; }   // left edge of content
 static uint8_t cR() { return settings.flipped ? 110 : 128; } // right edge of content (exclusive)
 
-// Small HH:MM clock centered in the header strip, between the left-aligned title
+// Small HH:MM:SS clock centered in the header strip, between the left-aligned title
 // and any right-aligned indicator. Drawn only once the time is known (NTP or PC).
 static void drawHeaderClock() {
-  uint8_t h, m;
-  if (!clockGet(h, m)) return;
-  char t[6];
-  snprintf(t, sizeof(t), "%02u:%02u", h, m);
+  uint8_t h, m, s;
+  if (!clockGet(h, m, s)) return;
+  char t[9];
+  snprintf(t, sizeof(t), "%02u:%02u:%02u", h, m, s);
   u8g2.setFont(u8g2_font_5x7_tr);
   u8g2.drawStr(64 - u8g2.getStrWidth(t) / 2, 9, t);
 }
@@ -622,7 +682,7 @@ static void drawList(const char *title, const char *const *items, uint8_t count,
 }
 
 static void drawBtnTest() {
-  drawListHeader("BTN TEST");
+  drawListHeader("BTNTEST");
   u8g2.setFont(u8g2_font_6x12_tr);
   if (testLastHid < 0) u8g2.drawStr(0, 34, "Press any button");
   else {
@@ -757,7 +817,7 @@ static void drawCapture() {
 }
 
 static void drawChordOutput() {
-  drawListHeader(editingOutput ? "EDIT OUT" : "OUTPUT");
+  drawListHeader(editingOutput ? "EDITOUT" : "OUTPUT");
   char mem[24]; fmtMembers(editingOutput ? chords[editChord].members : pendingMembers, mem, sizeof(mem));
   u8g2.setFont(u8g2_font_6x12_tr); u8g2.drawStr(cL()+2, 30, mem);
   char line[20];
@@ -770,7 +830,7 @@ static void drawChordOutput() {
 }
 
 static void drawChordEdit() {
-  drawListHeader("EDIT CHD");
+  drawListHeader("EDITCHD");
   char outItem[16];
   if      (chords[editChord].output == CHORD_OUT_BRIGHT) snprintf(outItem, sizeof(outItem), "Output: Bri");
   else if (chords[editChord].output == CHORD_OUT_VOLUME) snprintf(outItem, sizeof(outItem), "Output: Vol");
@@ -935,7 +995,7 @@ static void drawLauncher() {
 // PC telemetry dashboard: a bar + number per enabled stat (right of the legend).
 static void drawDash() {
   uint32_t now = millis();
-  drawListHeader("PC STATS");
+  drawListHeader("PCSTATS");
   NavHint legend[4] = {{H_NONE, ""}, {H_NONE, ""}, {H_TEXT, "C"}, {H_LEFT, ""}};  // ►=config ◄=back
   if (!pcStatsFresh(now)) {
     u8g2.setFont(u8g2_font_6x12_tr);
@@ -975,7 +1035,7 @@ static void drawDash() {
 }
 
 static void drawPcStatsCfg() {
-  drawListHeader("PC STATS");
+  drawListHeader("PCSTATS");
   const uint8_t visible = 4;
   uint8_t start = (sel >= visible) ? (sel - visible + 1) : 0;
   for (uint8_t row = 0; row < visible && (start + row) < PCSTAT_TOTAL; row++) {
@@ -1029,19 +1089,10 @@ static void drawAppOrder() {
   u8g2.sendBuffer();
 }
 
-// Friendly name for a physical button: the 10 grid buttons are B1..B10, the 4 nav
-// buttons are UP/DOWN/ENTER/BACK (HID 10..13, in NavAction order).
-static const char *NAVBTN_NAMES[NUM_NAV] = {"UP", "DOWN", "ENTER", "BACK"};
-static void mcduBtnLabel(uint8_t i, char *buf, size_t n) {
-  if (i < NUM_ALWAYS)                 snprintf(buf, n, "B%u", i + 1);
-  else if (i - NUM_ALWAYS < NUM_NAV)  snprintf(buf, n, "%s", NAVBTN_NAMES[i - NUM_ALWAYS]);
-  else                                snprintf(buf, n, "?");
-}
-
 // MCDU button-remap editor (press-capture): press the physical button you want to
 // remap and the output picker opens for it. The menu/toggle button exits.
 static void drawMcduMap() {
-  drawListHeader("MCDU KEY");
+  drawListHeader("MCDUKEY");
   u8g2.setFont(u8g2_font_6x12_tr);
   u8g2.drawStr(cL() + 2, 34, "Press a button");
   u8g2.setFont(u8g2_font_5x7_tr);
@@ -1052,8 +1103,7 @@ static void drawMcduMap() {
 
 // Output picker submenu: choose the MCDU output for button mcduEditBtn.
 static void drawMcduMapSet() {
-  char bl[8]; mcduBtnLabel(mcduEditBtn, bl, sizeof(bl));
-  char hdr[14]; snprintf(hdr, sizeof(hdr), "SET %s", bl);
+  char hdr[10]; snprintf(hdr, sizeof(hdr), "SET %u", mcduEditBtn + 1);   // button by grid number
   drawListHeader(hdr);
   const uint8_t visible = 4;
   uint8_t start = (sel >= visible) ? (sel - visible + 1) : 0;
@@ -1064,6 +1114,45 @@ static void drawMcduMapSet() {
     if (idx == sel) { u8g2.drawBox(cL(), y, 110, 12); u8g2.setDrawColor(0); }
     u8g2.drawStr(cL() + 3, y + 10, mcduOutputLabel(idx));
     u8g2.setDrawColor(1);
+  }
+  drawNavLegend(LIST_HINTS);
+  u8g2.sendBuffer();
+}
+
+// Keyboard-binding editor (press-capture): press the physical button you want to bind
+// and the key picker opens for it. The menu/toggle button exits.
+static void drawKeymap() {
+  drawListHeader("KEYBIND");
+  u8g2.setFont(u8g2_font_6x12_tr);
+  u8g2.drawStr(cL() + 2, 34, "Press a button");
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(cL() + 2, 47, "to bind it to a key.");
+  u8g2.drawStr(cL() + 2, 60, "Menu button = exit");
+  u8g2.sendBuffer();
+}
+
+// Key editor for button keyEditOut: 4 modifier toggles + the bound key. On the Key row,
+// Select enters scroll-adjust (drawn framed instead of inverted) so Up/Down change the key.
+static void drawKeymapSet() {
+  char hdr[10]; snprintf(hdr, sizeof(hdr), "KEY %u", keyEditOut + 1);   // button by grid number
+  drawListHeader(hdr);
+  const uint8_t ROWS = 5;          // Ctrl / Shift / Alt / Gui / Key
+  const uint8_t visible = 4;
+  uint8_t start = (sel >= visible) ? (sel - visible + 1) : 0;
+  u8g2.setFont(u8g2_font_6x12_tr);
+  for (uint8_t row = 0; row < visible && (start + row) < ROWS; row++) {
+    uint8_t idx = start + row;
+    uint8_t y = 16 + row * 12;
+    bool onKeyRow = (idx == 4);
+    bool framed = (idx == sel) && keyAdjust && onKeyRow;    // adjust mode: outline, not invert
+    if ((idx == sel) && !framed) { u8g2.drawBox(cL(), y, 110, 12); u8g2.setDrawColor(0); }
+    char line[24];
+    if (onKeyRow) snprintf(line, sizeof(line), "Key: %s", keyUsageLabel(settings.keyKey[keyEditOut]));
+    else          snprintf(line, sizeof(line), "%s %s",
+                           (settings.keyMod[keyEditOut] & (1u << idx)) ? "[x]" : "[ ]", MOD_LABELS[idx]);
+    u8g2.drawStr(cL() + 3, y + 10, line);
+    u8g2.setDrawColor(1);
+    if (framed) u8g2.drawFrame(cL(), y, 110, 12);
   }
   drawNavLegend(LIST_HINTS);
   u8g2.sendBuffer();
@@ -1871,6 +1960,8 @@ static void render() {
     case PAGE_FLIGHT:        drawFlight();                                               break;
     case PAGE_MCDU:          drawMcdu();                                                 break;
     case PAGE_VOLUME:        drawVolume();                                               break;
+    case PAGE_KEYMAP:        drawKeymap();                                               break;
+    case PAGE_KEYMAP_SET:    drawKeymapSet();                                            break;
   }
 }
 
@@ -1949,9 +2040,9 @@ void uiHandlePageInput() {
   // chord engine). A "claimed" button is suppressed so it doesn't also send HID.
   // MCDU repurposes EVERY button as an MCDU key (forwarded raw to the companion),
   // so it grabs all of them too; the menu/toggle button stays the exit.
-  // PAGE_MCDUMAP captures a button press to pick which one to remap, so it grabs all too.
+  // PAGE_MCDUMAP / PAGE_KEYMAP capture a button press to pick which one to edit, so they grab all too.
   bool grabAll = (page == PAGE_CHORD_CAPTURE || page == PAGE_BTNTEST || page == PAGE_MCDU ||
-                  page == PAGE_MCDUMAP);
+                  page == PAGE_MCDUMAP || page == PAGE_KEYMAP);
   // While the menu button is held, buttons that form a chord WITH it belong to the
   // chord engine, not the page UI — otherwise a Menu+nav chord could never form on
   // pages that claim the nav buttons. (Not on capture, where menu is the save key.)
@@ -1961,13 +2052,16 @@ void uiHandlePageInput() {
     if (!pressedEdge(physBtn(i))) continue;
     if (menuBuddies & (1u << i)) continue;        // leave it for the menu chord
     bool isNav = (i >= NUM_ALWAYS);
-    if (!grabAll && !isNav) continue;             // non-nav button stays a live gamepad button
+    if (!grabAll && !isNav) continue;             // non-nav button stays a live key
     uiSuppressedMask |= (1u << i);
     if (page == PAGE_CHORD_CAPTURE)   { captureMask ^= (1u << i); displayDirty = true; }
     else if (page == PAGE_BTNTEST)    { testLastHid = i; testLastGpio = hidGpio(i); displayDirty = true; }
     else if (page == PAGE_MCDU)       { mcduHandleButton(i); displayDirty = true; }   // map -> scroll/key
     else if (page == PAGE_MCDUMAP)    {                       // press a button -> pick its output
       mcduEditBtn = i; gotoPage(PAGE_MCDUMAP_SET); sel = settings.mcduMap[i]; return;
+    }
+    else if (page == PAGE_KEYMAP)     {                       // press a button -> edit its key binding
+      keyEditOut = i; gotoPage(PAGE_KEYMAP_SET); sel = 0; return;
     }
     else if (isNav) {
       uint8_t ni = i - NUM_ALWAYS;

@@ -1,11 +1,11 @@
 // ============================================================================
 //  ESP32-S3 buttonbox  —  15 buttons + CR-10 (ST7920) display
 //
-//  Native USB HID gamepad (32 buttons) + an on-screen menu UI. Modules:
+//  Native NKRO USB HID keyboard + an on-screen menu UI. Modules:
 //    config    pin map / counts            buttons   debounced inputs
-//    display   the ST7920 panel            hid       USB gamepad
-//    settings  NVS-persisted options       stopwatch lap timer
-//    chords    2+ button combos -> button  ui        pages / nav / rendering
+//    display   the ST7920 panel            hid       key output dispatch
+//    settings  NVS-persisted options       keyboard  NKRO USB keyboard
+//    chords    2+ button combos -> output  ui        pages / nav / rendering
 //  This file just wires them together: init in setup(), tick in loop().
 // ============================================================================
 
@@ -23,7 +23,7 @@
 #include "ui.h"
 
 #if !defined(ARDUINO_USB_MODE) || ARDUINO_USB_MODE != 0
-#error "Set -DARDUINO_USB_MODE=0 in platformio.ini so the box enumerates as a USB gamepad."
+#error "Set -DARDUINO_USB_MODE=0 in platformio.ini so the box enumerates as a native USB keyboard."
 #endif
 
 void setup() {
@@ -59,7 +59,7 @@ void loop() {
     if (uiPage() != PAGE_BUTTONS) uiHandlePageInput();
   }
   // The chord/HID engine then runs on EVERY page: any button not claimed by the
-  // UI stays a live gamepad button (so the non-nav buttons work everywhere).
+  // UI stays a live key (so the non-nav buttons work everywhere).
   updateChords(now);
 
   if (uiPage() == PAGE_TIMER)   uiHandleTimerLap(now);

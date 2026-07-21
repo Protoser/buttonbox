@@ -47,7 +47,7 @@ void clockUpdate(uint32_t) {
   }
 }
 
-bool clockGet(uint8_t &h, uint8_t &m) {
+bool clockGet(uint8_t &h, uint8_t &m, uint8_t &s) {
   if (!tzKnown) return false;                       // don't know the local offset yet
   time_t utc = time(nullptr);
   if (utc < SYNCED_EPOCH) return false;             // never synced by NTP or the PC
@@ -55,5 +55,6 @@ bool clockGet(uint8_t &h, uint8_t &m) {
   struct tm t; gmtime_r(&local, &t);                // gmtime: read the shifted epoch as wall time
   h = (uint8_t)t.tm_hour;
   m = (uint8_t)t.tm_min;
+  s = (uint8_t)t.tm_sec;
   return true;
 }

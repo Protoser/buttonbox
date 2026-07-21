@@ -37,7 +37,7 @@ static const uint8_t NAV_BUTTON_PINS[] = {1, 5, 6, 4};
 
 static constexpr uint8_t NUM_ALWAYS = sizeof(ALWAYS_BUTTON_PINS) / sizeof(ALWAYS_BUTTON_PINS[0]);
 static constexpr uint8_t NUM_NAV    = sizeof(NAV_BUTTON_PINS)    / sizeof(NAV_BUTTON_PINS[0]);
-static constexpr uint8_t NUM_HID    = NUM_ALWAYS + NUM_NAV;   // 14 (USB gamepad supports 16)
+static constexpr uint8_t NUM_HID    = NUM_ALWAYS + NUM_NAV;   // 14 physical buttons
 
 // Menu navigation actions, in NAV_BUTTON_PINS order.
 enum NavAction : uint8_t { NAV_UP = 0, NAV_DOWN = 1, NAV_SELECT = 2, NAV_BACK = 3 };

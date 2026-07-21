@@ -4,7 +4,7 @@
 #include <Arduino.h>
 #include "config.h"
 
-// Special (non-HID) chord outputs, >= 32 so they never collide with a gamepad bit.
+// Special (non-HID) chord outputs, >= 32 so they never collide with a key-output index (0..31).
 // A chord with this output runs a UI action instead of pressing a button (see
 // updateChords / ui uiBrightnessChord / uiOpenVolume).
 static constexpr uint8_t CHORD_OUT_BRIGHT = 32;

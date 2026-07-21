@@ -50,7 +50,7 @@ static int cfgAppend(char *buf, int n, int cap, const char *fmt, ...) {
 }
 
 static void emitConfig() {
-  char buf[384]; int n = 0;
+  char buf[448]; int n = 0;
   n = cfgAppend(buf, n, sizeof(buf), "cfg flip:%u labels:%u idle:%u chord:%u boot:%u pcorder:",
                 settings.flipped, settings.labelsGpio, settings.idleBlankSec,
                 settings.chordWindowMs, settings.bootSel);
@@ -66,14 +66,24 @@ static void emitConfig() {
   n = cfgAppend(buf, n, sizeof(buf), " funits:%u engsty:%u brfull:%u bridle:%u dimidle:%u",
                 settings.flightUnits, settings.engStyle,
                 settings.brightFull, settings.brightIdle, settings.dimIdleSec);
-  n = cfgAppend(buf, n, sizeof(buf), " wssid:%s ship:%s shuser:%s wmode:%u wledip:%s nchords:%u\n",
+  uint8_t nkeys = 0;
+  for (uint8_t o = 0; o < KEYMAP_N; o++) if (settings.keyKey[o]) nkeys++;
+  n = cfgAppend(buf, n, sizeof(buf), " wssid:%s ship:%s shuser:%s wmode:%u wledip:%s nchords:%u nkeys:%u\n",
                 shellyConfig.wifiSsid, shellyConfig.shellyIp,
-                shellyConfig.shellyUser, settings.wifiMode, wledIp(), chordCount);
+                shellyConfig.shellyUser, settings.wifiMode, wledIp(), chordCount, nkeys);
   hostlinkSend(buf);
   for (uint8_t i = 0; i < chordCount; i++) {
     char cb[40];
     snprintf(cb, sizeof(cb), "chd %u:%lu:%u\n", i, (unsigned long)chords[i].members, chords[i].output);
     hostlinkSend(cb);
+  }
+  // One kb line per bound output (keyKey != 0). The companion resets its map on the
+  // cfg line and fills from these, so unbound outputs simply aren't sent.
+  for (uint8_t o = 0; o < KEYMAP_N; o++) {
+    if (!settings.keyKey[o]) continue;
+    char kb[24];
+    snprintf(kb, sizeof(kb), "kb %u:%u:%u\n", o, settings.keyMod[o], settings.keyKey[o]);
+    hostlinkSend(kb);
   }
 }
 
@@ -101,6 +111,17 @@ static void handleSet(char *args, uint32_t now) {
       if (end == p2) break;
       if (idx >= 0 && idx < MCDU_OUTPUT_COUNT) settings.mcduMap[i] = (uint8_t)idx;
       p2 = end; if (*p2 == ',') p2++; else break;
+    }
+  }
+  else if (!strcmp(key, "keybind")) {
+    // keybind:<out>:<mod>:<key> — set one output's keyboard binding (key 0 = unbind)
+    char *p2 = colon + 1;
+    long out = strtol(p2, &p2, 10);
+    if (out >= 0 && out < KEYMAP_N && *p2 == ':') {
+      long mod = strtol(p2 + 1, &p2, 10);
+      long k   = (*p2 == ':') ? strtol(p2 + 1, &p2, 10) : 0;
+      settings.keyMod[out] = (uint8_t)mod;
+      settings.keyKey[out] = (uint8_t)k;
     }
   }
   else if (!strcmp(key, "pcorder")) {

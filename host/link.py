@@ -29,6 +29,7 @@ class DeviceLink(QThread):
     disconnected   = Signal()
     configReceived = Signal(dict)    # {flip,labels,idle,chord,boot,pcorder,apporder,apphidden,nchords}
     chordsReceived = Signal(list)    # [{index,members,output}, ...]
+    keymapReceived = Signal(list)    # [{output,mod,key}, ...] keyboard bindings (one per bound output)
     statsRead      = Signal(dict)    # {cpu,ram,gpu,ct,gt}
     lhmStatus      = Signal(bool, str)
     flashStarted   = Signal()        # emitted when flash command is sent
@@ -113,6 +114,7 @@ class DeviceLink(QThread):
     def set_setting(self, k, v): self.send(f"set {k}:{v}")
     def add_chord(self, mask, out): self.send(f"chord add {int(mask)}:{int(out)}")
     def del_chord(self, i):     self.send(f"chord del {int(i)}")
+    def set_keybind(self, out, mod, key): self.send(f"set keybind:{int(out)}:{int(mod)}:{int(key)}")
 
     def _queue_volset(self, arg):
         """Parse a box 'volset <who>:<pct>' request ('master' or an app index) onto the
@@ -374,6 +376,8 @@ class DeviceLink(QThread):
         buf = b""
         exp_chords = 0
         chords = []
+        exp_keys = 0
+        keymap = []
         last_slow = 0.0          # monotonic of last slow telemetry write (sensors/music/clock)
 
         while self._running:
@@ -505,12 +509,24 @@ class DeviceLink(QThread):
                         chords = []
                         if exp_chords == 0:
                             self.chordsReceived.emit([])
+                        # Keyboard bindings arrive as kb lines right after the chd lines; the
+                        # box only sends bound outputs, so reset here and fill as they come.
+                        exp_keys = cfg.get("nkeys", 0)
+                        keymap = []
+                        if exp_keys == 0:
+                            self.keymapReceived.emit([])
                     elif line.startswith("chd "):
                         c = self._parse_chd(line)
                         if c is not None:
                             chords.append(c)
                             if len(chords) >= exp_chords:
                                 self.chordsReceived.emit(list(chords))
+                    elif line.startswith("kb "):
+                        k = self._parse_kb(line)
+                        if k is not None:
+                            keymap.append(k)
+                            if len(keymap) >= exp_keys:
+                                self.keymapReceived.emit(list(keymap))
                     elif line == "shelly_toggle":
                         self._shelly_toggle_event.set()
                     elif line.startswith("wledcmd "):
@@ -586,5 +602,14 @@ class DeviceLink(QThread):
             _, rest = line.split(" ", 1)
             i, mask, out = rest.split(":")
             return {"index": int(i), "members": int(mask), "output": int(out)}
+        except Exception:                   # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _parse_kb(line):
+        try:
+            _, rest = line.split(" ", 1)
+            out, mod, key = rest.split(":")
+            return {"output": int(out), "mod": int(mod), "key": int(key)}
         except Exception:                   # noqa: BLE001
             return None

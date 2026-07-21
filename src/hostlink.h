@@ -4,13 +4,15 @@
 //   <key:value ...>            -> PC telemetry (pcStatsApply)
 //   get                        -> reply with current config (cfg + chd lines)
 //   set <key>:<val>            -> change a setting, persist, reply cfg
+//   set keybind:<out>:<mod>:<key> -> bind output's keyboard key+modifier (key 0 = unbind)
 //   chord add <mask>:<output>  -> append a chord (raw 0-based values), reply
 //   chord del <index>          -> remove a chord, reply
 //   flash                      -> enter the bootloader
 //
 // Replies (device -> app):
-//   cfg flip:.. labels:.. idle:.. chord:.. boot:.. pcorder:i,i,i,i,i apporder:i,.. apphidden:mask nchords:..
+//   cfg flip:.. labels:.. idle:.. chord:.. boot:.. pcorder:.. apporder:.. apphidden:.. nchords:.. nkeys:..
 //   chd <i>:<membersMask>:<output>      (one per chord)
+//   kb  <out>:<mod>:<key>               (one per bound output; nkeys of them)
 #pragma once
 #include <Arduino.h>
 

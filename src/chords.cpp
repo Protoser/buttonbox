@@ -5,7 +5,7 @@
 #include "ui.h"
 #include <Preferences.h>
 
-// A special (non-HID) output drives a UI action instead of a gamepad button.
+// A special (non-HID) output drives a UI action instead of a key press.
 static inline bool outIsSpecial(uint8_t o) { return o >= 32; }
 
 Chord    chords[MAX_CHORDS];
@@ -59,9 +59,9 @@ uint8_t firstFreeOutput() {
 int8_t activeChordOutput() { return (activeChord >= 0) ? (int8_t)chords[activeChord].output : -1; }
 
 void resetChordEngine() {
-  for (uint8_t i = 0; i < NUM_HID; i++) if (emittedMask & (1u << i)) gamepad.releaseButton(i);
+  for (uint8_t i = 0; i < NUM_HID; i++) if (emittedMask & (1u << i)) hidEmitRelease(i);
   if (activeChord >= 0 && !outIsSpecial(chords[activeChord].output))
-    gamepad.releaseButton(chords[activeChord].output);
+    hidEmitRelease(chords[activeChord].output);
   emittedMask = 0; chordOwnedMask = 0; pendingMask = 0; activeChord = -1;
 }
 
@@ -96,18 +96,18 @@ void updateChords(uint32_t now) {
   }
 
   if (activeChord >= 0 && (chords[activeChord].members & physMask) != chords[activeChord].members) {
-    if (!outIsSpecial(chords[activeChord].output)) gamepad.releaseButton(chords[activeChord].output);
+    if (!outIsSpecial(chords[activeChord].output)) hidEmitRelease(chords[activeChord].output);
     activeChord = -1;
   }
 
   if (best >= 0 && best != activeChord) {
     for (uint8_t i = 0; i < NUM_HID; i++)
-      if ((chords[best].members & (1u << i)) && (emittedMask & (1u << i))) { gamepad.releaseButton(i); emittedMask &= ~(1u << i); }
-    if (activeChord >= 0 && !outIsSpecial(chords[activeChord].output)) gamepad.releaseButton(chords[activeChord].output);
+      if ((chords[best].members & (1u << i)) && (emittedMask & (1u << i))) { hidEmitRelease(i); emittedMask &= ~(1u << i); }
+    if (activeChord >= 0 && !outIsSpecial(chords[activeChord].output)) hidEmitRelease(chords[activeChord].output);
     // Special outputs run a UI action once, on activation; normal ones press a button.
     if      (chords[best].output == CHORD_OUT_BRIGHT) uiBrightnessChord(now);
     else if (chords[best].output == CHORD_OUT_VOLUME) uiOpenVolume(now);
-    else                                              gamepad.pressButton(chords[best].output);
+    else                                              hidEmitPress(chords[best].output);
     activeChord = best; chordOwnedMask |= chords[best].members;
     pendingMask &= ~chords[best].members;   // members joined a chord -> no deferred solo tap
   }
@@ -120,7 +120,7 @@ void updateChords(uint32_t now) {
     if (!(physMask & bit) || (chordOwnedMask & bit) || (emittedMask & bit)) continue;
     bool isMember = (chordMemberMask & bit);
     if (isMember && activeChord < 0 && (now - downTime[i]) < settings.chordWindowMs) { pendingMask |= bit; continue; }
-    gamepad.pressButton(i); emittedMask |= bit; emitTime[i] = now; pendingMask &= ~bit;
+    hidEmitPress(i); emittedMask |= bit; emitTime[i] = now; pendingMask &= ~bit;
   }
 
   for (uint8_t i = 0; i < NUM_HID; i++) {
@@ -128,10 +128,10 @@ void updateChords(uint32_t now) {
     if (physMask & bit) continue;
     if (emittedMask & bit) {
       // Hold every solo press at least MIN_PRESS_MS so fast taps aren't missed.
-      if ((now - emitTime[i]) >= MIN_PRESS_MS) { gamepad.releaseButton(i); emittedMask &= ~bit; }
+      if ((now - emitTime[i]) >= MIN_PRESS_MS) { hidEmitRelease(i); emittedMask &= ~bit; }
     } else if (pendingMask & bit) {
       // Released inside the chord window without forming a chord: fire the tap now.
-      gamepad.pressButton(i); emittedMask |= bit; emitTime[i] = now;
+      hidEmitPress(i); emittedMask |= bit; emitTime[i] = now;
     }
     if (!(emittedMask & bit)) { pendingMask &= ~bit; chordOwnedMask &= ~bit; }
   }

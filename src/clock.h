@@ -10,4 +10,4 @@
 void clockBegin();                                    // load the persisted TZ offset
 void clockUpdate(uint32_t now);                       // start NTP once WiFi is up
 void clockApplyHost(const char *args, uint32_t now);  // "<epochUTC> <offsetSec>" from companion
-bool clockGet(uint8_t &h, uint8_t &m);                // local HH:MM; false until first sync
+bool clockGet(uint8_t &h, uint8_t &m, uint8_t &s);    // local HH:MM:SS; false until first sync

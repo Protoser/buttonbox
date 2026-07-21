@@ -30,7 +30,7 @@ Two programs, one cable:
 ```
    ESP32-S3 firmware  (src/, C++/Arduino)            PC companion (host/, Python/PySide6)
    ┌─────────────────────────────────┐               ┌──────────────────────────────────┐
-   │ buttons → chords/HID → USB HID   │  USB HID  ───▶│ games / OS see a 32-button gamepad │
+   │ buttons → chords → key output    │  USB HID  ───▶│ OS/apps see an NKRO USB keyboard  │
    │ ST7920 display ← ui pages        │               │                                    │
    │ hostlink (CDC serial) ◀────────▶ │  USB CDC  ◀──▶ │ link.py serial thread             │
    │   telemetry in, config out       │   serial      │   sensors / media / shelly polling │
@@ -38,8 +38,10 @@ Two programs, one cable:
                                                       └──────────────────────────────────┘
 ```
 
-- The box is a **native USB HID gamepad** (32-button mask) — that's the input the
-  PC games consume. HID is input-only.
+- The box is a **native NKRO USB HID keyboard** — each of the 32 outputs (14 physical
+  buttons + 18 chord outputs) is bound to a key + modifier (`settings.keyKey`/`keyMod`;
+  0 = unbound). A custom bitmap report gives n-key rollover (no 6-key limit). HID is
+  input-only. (It used to be a 32-button gamepad; the keyboard replaced it.)
 - A second **USB CDC serial** channel (`hostlink` ⇄ `link.py`) is the two-way
   control link: the PC pushes telemetry (PC stats, now-playing media, Shelly
   state) for the box to display, and the GUI reads/writes settings and chords.
@@ -58,15 +60,17 @@ PC → box:
 - `time <epochUTC> <offsetSec>` — clock sync → `clockApplyHost` (header clock; box has
   no RTC — also self-syncs via NTP over WiFi, ticks on the system clock, sent hourly)
 - `wled on:.. bri:.. ps:..` — WLED state pushed by the companion → `wledApplyFromCompanion`
-- `get` — request current config; box replies `cfg` + `chd` lines
+- `get` — request current config; box replies `cfg` + `chd` + `kb` lines
 - `set <key>:<val>` — change & persist a setting, box replies `cfg`
+- `set keybind:<out>:<mod>:<key>` — bind an output's keyboard key + modifier (key 0 = unbind)
 - `chord add <mask>:<output>` / `chord del <index>` — edit chords, box replies
 - `flash` — enter bootloader (Flash Mode)
 - (Shelly state pushed from `shelly_poll.py` so the box needn't join WiFi)
 
 Box → PC:
-- `cfg flip:.. labels:.. idle:.. chord:.. boot:.. pcorder:.. wledip:.. nchords:..`
+- `cfg flip:.. labels:.. idle:.. chord:.. boot:.. pcorder:.. wledip:.. nchords:.. nkeys:..`
 - `chd <i>:<membersMask>:<output>` — one per configured chord
+- `kb <out>:<mod>:<key>` — one per **bound** output (nkeys of them; unbound outputs omitted)
 - `mctl prev|playpause|next` — media control requests (Music page → companion)
 - `wledcmd on|off|bri+|bri-|ps+|ps-` — WLED control requests (WLED page → companion, AUTO mode)
 
@@ -82,8 +86,9 @@ input-routing behavior.
 |------|------|-------|
 | [config.h](src/config.h) | Pin map, button counts, `NavAction` enum, debounce | **Single source of truth for pins.** 10 always-on HID pins + 4 nav pins + 1 mode-toggle. `NUM_HID = 14`. |
 | [buttons.h](src/buttons.h)/.cpp | Debounced reads, edge detection, `uiSuppressedMask` | UI "claims" buttons by suppressing them so chords/HID skip them. |
-| [hid.h](src/hid.h)/.cpp | USB gamepad report (32-bit button mask) | Thin wrapper over `USBHIDGamepad`. |
-| [chords.h](src/chords.h)/.cpp | 2+ button combos → one virtual button; `updateChords` | Runs **every page**; hold-window timing model; up to 18 chords; persisted to NVS. Physical buttons = HID 1–14, chord outputs = 15–32. |
+| [hid.h](src/hid.h)/.cpp | Key-output dispatch: `hidEmitPress/Release(out)` | Looks up each output's binding in `settings.keyKey`/`keyMod` and drives the keyboard. The only caller of the keyboard. |
+| [keyboard.h](src/keyboard.h)/.cpp | NKRO USB HID keyboard device | Custom `USBHIDDevice` with a hand-written bitmap report descriptor (1 modifier byte + 120-key bitmap). Aggregates all held outputs → one report. Replaced `USBHIDGamepad`. |
+| [chords.h](src/chords.h)/.cpp | 2+ button combos → one virtual output; `updateChords` | Runs **every page**; hold-window timing model; up to 18 chords; persisted to NVS. Physical buttons = output 0–13, chord outputs = 14–31 (each output → a key via the keymap). |
 | [settings.h](src/settings.h)/.cpp | NVS-persisted options via Preferences | orientation, label style, idle-blank, chord window, `bootSel` (boot screen). |
 | [display.h](src/display.h)/.cpp | The U8g2 ST7920 panel object | SW SPI on 17/18/21, rotated `U8G2_R2`. |
 | [ui.h](src/ui.h)/[ui.cpp](src/ui.cpp) | **All pages, nav, rendering** (~820 lines, biggest file) | Apps launcher + pages. `APPS[]` table drives the launcher grid. Page enum: `PAGE_LAUNCHER`, `PAGE_BUTTONS`, `PAGE_TIMER`, etc. Owns every `u8g2` draw call. |

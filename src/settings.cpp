@@ -32,6 +32,12 @@ void loadSettings() {
   { uint8_t mdef[MCDU_MAP_N] = {3, 9, 4, 10, 5, 11, 6, 12, 7, 13, 1, 2, 17, 16};
     if (p.getBytes("mcdumap", settings.mcduMap, MCDU_MAP_N) != MCDU_MAP_N)
       memcpy(settings.mcduMap, mdef, MCDU_MAP_N); }
+  { uint8_t kdef[KEYMAP_N] = {0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F, 0x70, 0x71};
+    if (p.getBytes("keykey", settings.keyKey, KEYMAP_N) != KEYMAP_N)
+      memcpy(settings.keyKey, kdef, KEYMAP_N); }
+  { uint8_t mdef[KEYMAP_N] = {0};
+    if (p.getBytes("keymod", settings.keyMod, KEYMAP_N) != KEYMAP_N)
+      memcpy(settings.keyMod, mdef, KEYMAP_N); }
   settings.flightUnits = p.getUChar("funits", 0);
   settings.engStyle    = p.getUChar("engsty", 0);
   settings.timerSec    = p.getUShort("timersec", 300);
@@ -54,6 +60,8 @@ void saveSettings() {
   p.putUShort("ahid", settings.appHidden);
   p.putUChar("wmode", settings.wifiMode);
   p.putBytes("mcdumap", settings.mcduMap, MCDU_MAP_N);
+  p.putBytes("keykey", settings.keyKey, KEYMAP_N);
+  p.putBytes("keymod", settings.keyMod, KEYMAP_N);
   p.putUChar("funits", settings.flightUnits);
   p.putUChar("engsty", settings.engStyle);
   p.putUShort("timersec", settings.timerSec);
