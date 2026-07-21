@@ -11,7 +11,7 @@ Run:   python app.py        (or pythonw app.py for no console)
 import os
 import sys
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPalette, QPixmap
 from PySide6.QtWebSockets import QWebSocket
 from PySide6.QtWidgets import (
@@ -52,6 +52,46 @@ PCSTAT_MAX = 5      # box shows up to 5 at once
 STAT_ROWS = [("cpu", "CPU", "%",   0, 100), ("ram", "RAM", "%",   0, 100), ("gpu", "GPU", "%", 0, 100),
              ("ct", "CPU Temp", "°C", 30, 100), ("gt", "GPU Temp", "°C", 30, 100),
              ("vr", "VRAM", "%", 0, 100), ("cp", "CPU Power", "W", 0, 250), ("gp", "GPU Power", "W", 0, 450)]
+
+# Keyboard bindings (Keys pane). Each output (0..13 physical, 14..31 chord outputs) maps to a
+# modifier mask + one HID usage (Keyboard/Keypad page 0x07; 0 = unbound). F13–F24 lead the list:
+# phantom keys no real keyboard has, so they never collide with typing/shortcuts.
+MODS = [("Ctrl", 0x01), ("Shift", 0x02), ("Alt", 0x04), ("Win", 0x08)]
+KEY_CHOICES = (
+    [("—", 0x00)]
+    + [(f"F{n}", 0x68 + n - 13) for n in range(13, 25)]                       # F13..F24 = 0x68..0x73
+    + [(f"F{n}", 0x3A + n - 1) for n in range(1, 13)]                         # F1..F12  = 0x3A..0x45
+    + [(chr(ord("A") + i), 0x04 + i) for i in range(26)]                      # A..Z     = 0x04..0x1D
+    + [(str((i + 1) % 10), 0x1E + i) for i in range(10)]                      # 1..9,0   = 0x1E..0x27
+    + [("Enter", 0x28), ("Esc", 0x29), ("Backspace", 0x2A), ("Tab", 0x2B), ("Space", 0x2C),
+       ("- _", 0x2D), ("= +", 0x2E), ("[ {", 0x2F), ("] }", 0x30), ("\\ |", 0x31),
+       ("; :", 0x33), ("' \"", 0x34), ("` ~", 0x35), (", <", 0x36), (". >", 0x37), ("/ ?", 0x38),
+       ("PrtSc", 0x46), ("ScrLk", 0x47), ("Pause", 0x48),
+       ("Insert", 0x49), ("Home", 0x4A), ("PgUp", 0x4B), ("Delete", 0x4C), ("End", 0x4D), ("PgDn", 0x4E),
+       ("Right", 0x4F), ("Left", 0x50), ("Down", 0x51), ("Up", 0x52)]
+)
+USAGE_LABEL = {usage: label for label, usage in KEY_CHOICES}
+
+# Windows virtual-key code -> HID usage, for the press-to-set key capture
+# (the companion is Windows-only, so nativeVirtualKey() is always a VK code).
+VK_TO_HID = {}
+for _i in range(26):                                   # A..Z
+    VK_TO_HID[0x41 + _i] = 0x04 + _i
+for _i in range(9):                                    # 1..9
+    VK_TO_HID[0x31 + _i] = 0x1E + _i
+VK_TO_HID[0x30] = 0x27                                 # 0
+for _i in range(12):                                   # F1..F12
+    VK_TO_HID[0x70 + _i] = 0x3A + _i
+for _i in range(12):                                   # F13..F24 (some keyboards/macros send them)
+    VK_TO_HID[0x7C + _i] = 0x68 + _i
+VK_TO_HID.update({
+    0x0D: 0x28, 0x1B: 0x29, 0x08: 0x2A, 0x09: 0x2B, 0x20: 0x2C,   # Enter Esc BS Tab Space
+    0xBD: 0x2D, 0xBB: 0x2E, 0xDB: 0x2F, 0xDD: 0x30, 0xDC: 0x31,   # -  =  [  ]  Backslash
+    0xBA: 0x33, 0xDE: 0x34, 0xC0: 0x35, 0xBC: 0x36, 0xBE: 0x37, 0xBF: 0x38,  # ; ' ` , . /
+    0x2C: 0x46, 0x91: 0x47, 0x13: 0x48,                            # PrtSc ScrLk Pause
+    0x2D: 0x49, 0x24: 0x4A, 0x21: 0x4B, 0x2E: 0x4C, 0x23: 0x4D, 0x22: 0x4E,  # Ins Home PgUp Del End PgDn
+    0x27: 0x4F, 0x25: 0x50, 0x28: 0x51, 0x26: 0x52,                # Right Left Down Up
+})
 
 APP_NAME = "ButtonboxCompanion"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -478,6 +518,197 @@ class ChordsPane(SettingsPane):
             self.link.del_chord(self.chords[row]["index"])
 
 
+class KeyCaptureButton(QPushButton):
+    """Press-to-set key selector. Click, then press the shortcut on the real keyboard:
+    the key AND its held modifiers are captured together. Esc cancels the capture
+    (bind Esc via the on-device editor if you need it). Right-click offers Clear and
+    the phantom keys (F13–F24) most keyboards can't type.
+
+    captured(mods, usage): mods is an int modifier mask, or None for menu picks that
+    should keep the row's current modifier checkboxes; usage 0 = unbind."""
+
+    captured = Signal(object, int)
+
+    def __init__(self):
+        super().__init__()
+        self._usage = 0
+        self._capturing = False
+        self.setMinimumWidth(96)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._menu)
+        self.clicked.connect(self._toggle_capture)
+        self._refresh()
+
+    def usage(self):
+        return self._usage
+
+    def set_usage(self, usage):
+        self._usage = usage
+        self._refresh()
+
+    def _refresh(self):
+        self.setText(USAGE_LABEL.get(self._usage, f"0x{self._usage:02X}"))
+
+    def _toggle_capture(self):
+        if self._capturing:
+            self._end_capture()
+        else:
+            self._capturing = True
+            self.setText("Press a key…")
+            self.grabKeyboard()
+
+    def _end_capture(self):
+        self._capturing = False
+        self.releaseKeyboard()
+        self._refresh()
+
+    def focusOutEvent(self, ev):
+        if self._capturing:
+            self._end_capture()
+        super().focusOutEvent(ev)
+
+    def keyPressEvent(self, ev):
+        if not self._capturing:
+            super().keyPressEvent(ev)
+            return
+        if ev.key() in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_Meta, Qt.Key_AltGr):
+            return                                    # modifier only: wait for the real key
+        if ev.key() == Qt.Key_Escape:
+            self._end_capture()                       # Esc = cancel
+            return
+        usage = VK_TO_HID.get(ev.nativeVirtualKey())
+        if usage is None:
+            return                                    # unmapped (media key etc.): keep waiting
+        m = ev.modifiers()
+        mods = ((0x01 if m & Qt.ControlModifier else 0) |
+                (0x02 if m & Qt.ShiftModifier   else 0) |
+                (0x04 if m & Qt.AltModifier     else 0) |
+                (0x08 if m & Qt.MetaModifier    else 0))
+        self._usage = usage
+        self._end_capture()
+        self.captured.emit(mods, usage)
+
+    def keyReleaseEvent(self, ev):
+        if not self._capturing:
+            super().keyReleaseEvent(ev)
+
+    def _menu(self, pos):
+        if self._capturing:
+            self._end_capture()
+        menu = QMenu(self)
+        menu.addAction("Clear (unbind)", lambda: self._pick(0, clear_mods=True))
+        phantom = menu.addMenu("Phantom key (F13–F24)")
+        for n in range(13, 25):
+            phantom.addAction(f"F{n}", lambda _checked=False, u=0x68 + n - 13: self._pick(u))
+        menu.exec(self.mapToGlobal(pos))
+
+    def _pick(self, usage, clear_mods=False):
+        self._usage = usage
+        self._refresh()
+        self.captured.emit(0 if clear_mods else None, usage)
+
+
+class KeysPane(SettingsPane):
+    """Per-output keyboard bindings. Each physical button (1–14) and chord output
+    (15–32) sends a modifier + key. Bindings live on the box (settings.keyKey/keyMod);
+    they arrive as `kb` lines (via keymapReceived) and are pushed one at a time with
+    `set keybind`. Physical buttons are also editable on the box: Menu → Key Binds."""
+
+    def __init__(self, link):
+        super().__init__(link)
+        self.rows = {}          # output index -> (list[QCheckBox], QComboBox)
+        lay = QVBoxLayout(self)
+        lay.addWidget(pane_title("Keys"))
+        intro = QLabel("Click a key field, then press the shortcut on your keyboard — the key and "
+                       "its modifiers are captured together. Esc cancels a capture. Right-click a "
+                       "field to clear it or to pick a phantom key (F13–F24: keys no keyboard has, "
+                       "so they never collide with typing — ideal for macros).")
+        intro.setWordWrap(True); intro.setStyleSheet("color: #888;")
+        lay.addWidget(intro)
+
+        preset = QPushButton("Preset physical buttons → F13–F24")
+        preset.clicked.connect(self._preset_f13)
+        lay.addWidget(preset, 0, Qt.AlignLeft)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(2)
+        for c, (name, _bit) in enumerate(MODS):
+            h = QLabel(name); h.setStyleSheet("color: #888;")
+            grid.addWidget(h, 0, 1 + c, Qt.AlignCenter)
+        grid.addWidget(QLabel("Key"), 0, 1 + len(MODS))
+        r = self._section(grid, 1, "Physical buttons", range(0, NUM_HID))
+        self._section(grid, r, "Chord outputs", range(OUT_MIN, OUT_MAX + 1))
+
+        holder = QWidget(); holder.setLayout(grid)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(holder)
+        scroll.setFrameShape(QFrame.NoFrame)
+        lay.addWidget(scroll, 1)
+
+    def _section(self, grid, r, title, outputs):
+        head = QLabel(title)
+        f = head.font(); f.setBold(True); head.setFont(f)
+        head.setStyleSheet("margin-top: 6px;")
+        grid.addWidget(head, r, 0, 1, 2 + len(MODS))
+        r += 1
+        for out in outputs:
+            grid.addWidget(QLabel(f"Button {out + 1}"), r, 0)
+            cbs = []
+            for c in range(len(MODS)):
+                cb = QCheckBox()
+                cb.toggled.connect(lambda _=False, o=out: self._row_changed(o))
+                grid.addWidget(cb, r, 1 + c, Qt.AlignCenter)
+                cbs.append(cb)
+            btn = KeyCaptureButton()
+            btn.captured.connect(lambda mods, usage, o=out: self._row_captured(o, mods, usage))
+            grid.addWidget(btn, r, 1 + len(MODS))
+            self.rows[out] = (cbs, btn)
+            r += 1
+        return r
+
+    def _row_captured(self, out, mods, usage):
+        """A capture or menu pick finished: mods is a mask (apply to the checkboxes)
+        or None (menu pick — keep the row's current checkboxes). Then push the row."""
+        cbs, btn = self.rows[out]
+        if mods is not None:
+            self._loading = True     # setting checkboxes must not re-push per toggle
+            for i, cb in enumerate(cbs):
+                cb.setChecked(bool(mods & MODS[i][1]))
+            self._loading = False
+        self._row_changed(out)
+
+    def _row_changed(self, out):
+        if self._loading:
+            return
+        cbs, btn = self.rows[out]
+        mods = sum(MODS[i][1] for i, cb in enumerate(cbs) if cb.isChecked())
+        self.link.set_keybind(out, mods, btn.usage())
+
+    def set_keymap(self, entries):
+        """Repopulate every row from the box's kb lines (called on connect / refresh).
+        Outputs the box didn't send are unbound, so default them to (0, none)."""
+        binding = {e["output"]: (e["mod"], e["key"]) for e in entries}
+        self._loading = True
+        for out, (cbs, btn) in self.rows.items():
+            mod, key = binding.get(out, (0, 0))
+            for i, cb in enumerate(cbs):
+                cb.setChecked(bool(mod & MODS[i][1]))
+            btn.set_usage(key)
+        self._loading = False
+
+    def _preset_f13(self):
+        # Physical buttons 1..12 -> F13..F24 (0x68..0x73); leaves 13-14 and chords as-is.
+        self._loading = True
+        for i in range(12):
+            cbs, btn = self.rows[i]
+            for cb in cbs:
+                cb.setChecked(False)
+            btn.set_usage(0x68 + i)
+        self._loading = False
+        for i in range(12):
+            self._row_changed(i)
+
+
 class NetworkPane(SettingsPane):
     """WiFi + Shelly + WLED connectivity. Edits are staged in the fields and
     pushed together on Apply (the password also goes to the encrypted store)."""
@@ -814,12 +1045,13 @@ class MainWindow(QMainWindow):
         self.display = DisplayPane(link)
         self.apps = AppsPane(link)
         self.chords = ChordsPane(link)
+        self.keys = KeysPane(link)
         self.network = NetworkPane(link)
         self.device = DevicePane(link)
         self.flight = FlightPane(link)
         self.mcdu = McduPane(link)
         panes = [("Monitor", self.monitor), ("Display", self.display), ("Apps", self.apps),
-                 ("Chords", self.chords), ("Flight", self.flight), ("MCDU", self.mcdu),
+                 ("Chords", self.chords), ("Keys", self.keys), ("Flight", self.flight), ("MCDU", self.mcdu),
                  ("Network", self.network), ("Device", self.device)]
 
         self.nav = QListWidget()
@@ -866,6 +1098,7 @@ class MainWindow(QMainWindow):
         link.statsRead.connect(self.monitor.set_stats)
         link.configReceived.connect(self._on_config)
         link.chordsReceived.connect(self.chords.set_chords)
+        link.keymapReceived.connect(self.keys.set_keymap)
         link.lhmStatus.connect(self._on_lhm)
         link.flashStarted.connect(self._on_flash_started)
 
