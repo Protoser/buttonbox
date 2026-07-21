@@ -1,7 +1,9 @@
 #include "display.h"
 #include "config.h"
 #include <math.h>
-#include "driver/gpio.h"   // gpio_hold_en/dis: latch the backlight pin through a reboot
+#include "driver/gpio.h"        // gpio_hold_en/dis: latch the backlight pin through a reboot
+#include "soc/soc.h"            // REG_CLR_BIT
+#include "soc/rtc_cntl_reg.h"   // RTC_CNTL_DIG_ISO_REG / DG_PAD_FORCE_UNHOLD
 
 // ST7920 in software SPI: clock=E, data=R/W, cs=RS. Rotation is applied from
 // saved settings via ui's applyOrientation(); the constructor value is a default.
@@ -35,6 +37,10 @@ void displayBacklightHoldFull() {
   pinMode(LCD_BACKLIGHT_PIN, OUTPUT);
   digitalWrite(LCD_BACKLIGHT_PIN, HIGH);
   gpio_hold_en((gpio_num_t)LCD_BACKLIGHT_PIN);
+  // Per-pad hold on a digital pad is gated by a global force-unhold bit that
+  // DEFAULTS TO 1 — with it set, the hold above does nothing and the pin floats
+  // (backlight dark) as soon as the chip resets. Clear the gate so the latch is real.
+  REG_CLR_BIT(RTC_CNTL_DIG_ISO_REG, RTC_CNTL_DG_PAD_FORCE_UNHOLD);
 }
 
 void displayBegin() {
