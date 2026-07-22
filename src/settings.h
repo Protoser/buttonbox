@@ -2,7 +2,7 @@
 #pragma once
 #include <Arduino.h>
 
-static const uint8_t APP_ORDER_MAX = 12;  // launcher-order capacity (>= number of apps in ui.cpp APPS)
+static const uint8_t APP_ORDER_MAX = 13;  // launcher-order capacity (>= number of apps in ui.cpp APPS)
 static const uint8_t MCDU_MAP_N    = 14;  // physical buttons remappable on the MCDU page (== NUM_HID)
 static const uint8_t KEYMAP_N      = 32;  // keyboard binding per output: 0..13 physical, 14..31 chord outputs
 
@@ -15,6 +15,13 @@ static const uint8_t KM_GUI   = 0x08;
 // Flight-display unit flags (settings.flightUnits bitfield).
 static const uint8_t FU_SPEED_MPH = 0x01;  // airspeed in mph (else kt)
 static const uint8_t FU_ALT_M     = 0x02;  // altitude in metres (else ft)
+
+// Clock app display flags (settings.clockFlags bitfield).
+static const uint8_t CLK_DIGITAL  = 0x01;  // digital readout (else analog dial)
+static const uint8_t CLK_SECONDS  = 0x02;  // show the seconds hand / digital seconds
+static const uint8_t CLK_NUMERALS = 0x04;  // analog: draw 12/3/6/9 numerals
+static const uint8_t CLK_DATE     = 0x08;  // show the weekday/date line
+static const uint8_t CLK_24H      = 0x10;  // digital: 24-hour (else 12-hour AM/PM)
 
 struct Settings {
   bool     flipped       = false;  // when true: no screen rotation (panel in non-default position)
@@ -40,6 +47,7 @@ struct Settings {
   uint8_t  brightFull     = 100;             // active backlight brightness % (5..100)
   uint8_t  brightIdle     = 20;              // dimmed backlight brightness % when idle (0..100)
   uint16_t dimIdleSec     = 15;              // auto-dim to brightIdle after N s idle (0 = never)
+  uint8_t  clockFlags     = CLK_NUMERALS | CLK_SECONDS | CLK_DATE | CLK_24H;  // Clock: analog, 12 numerals, seconds+date, 24h
 };
 extern Settings settings;
 

@@ -65,6 +65,8 @@ static const uint8_t MENU_COUNT     = 8;
 static const char *SETTINGS_ITEMS[] = {"Rotate", "Labels", "Idle blank", "Brightness", "Idle bright",
                                        "Auto-dim", "Chord", "Boot", "WiFi", "Back"};
 static const uint8_t SETTINGS_COUNT = 10;
+static const char *CLOCKCFG_ITEMS[] = {"Style", "Seconds", "Numerals", "Date", "Hour fmt", "Back"};
+static const uint8_t CLOCKCFG_COUNT = 6;
 static const char *PCSTAT_ITEMS[]   = {"CPU", "RAM", "GPU", "CPU Temp", "GPU Temp",
                                        "VRAM", "CPU Pwr", "GPU Pwr"};
 static const uint8_t PCSTAT_NUM      = 8;   // number of selectable stats
@@ -176,6 +178,7 @@ static void iconBeamng(int cx, int cy);
 static void iconFlight(int cx, int cy);
 static void iconMcdu(int cx, int cy);
 static void iconVolume(int cx, int cy);
+static void iconClock(int cx, int cy);
 
 struct App { const char *name; void (*drawIcon)(int cx, int cy); Page page; };
 // New apps append here so existing persisted app indices (appOrder/appHidden) stay valid.
@@ -192,6 +195,7 @@ static const App APPS[] = {
   {"MCDU",    iconMcdu,    PAGE_MCDU},
   {"Timer",   iconCdTimer, PAGE_CDTIMER},
   {"Volume",  iconVolume,  PAGE_VOLUME},
+  {"Clock",   iconClock,   PAGE_CLOCK},
 };
 static const uint8_t APP_COUNT = sizeof(APPS) / sizeof(APPS[0]);
 
@@ -436,6 +440,25 @@ static void handleNav(uint8_t a) {
       else if (a == NAV_DOWN) {
         if      (wledFocus == 0) wledPowerOff();
         else if (wledFocus == 2) wledPresetPrev();
+      }
+      break;
+
+    case PAGE_CLOCK:
+      if      (a == NAV_SELECT) { gotoPage(PAGE_CLOCKCFG); return; }
+      else if (a == NAV_BACK)   { gotoPage(PAGE_LAUNCHER); return; }
+      break;
+
+    case PAGE_CLOCKCFG:
+      if      (a == NAV_UP)   { if (sel > 0) sel--; }
+      else if (a == NAV_DOWN) { if (sel < CLOCKCFG_COUNT - 1) sel++; }
+      else if (a == NAV_BACK) { gotoPage(PAGE_CLOCK); return; }
+      else switch (sel) {   // NAV_SELECT toggles the highlighted option
+        case 0: settings.clockFlags ^= CLK_DIGITAL;  saveSettings(); break;
+        case 1: settings.clockFlags ^= CLK_SECONDS;  saveSettings(); break;
+        case 2: settings.clockFlags ^= CLK_NUMERALS; saveSettings(); break;
+        case 3: settings.clockFlags ^= CLK_DATE;     saveSettings(); break;
+        case 4: settings.clockFlags ^= CLK_24H;      saveSettings(); break;
+        case 5: gotoPage(PAGE_CLOCK); return;
       }
       break;
 
@@ -959,6 +982,156 @@ static void drawVolume() {
     char pv[5]; snprintf(pv, sizeof(pv), "%u", vol);
     u8g2.drawStr(cR() - 2 - u8g2.getStrWidth(pv), y + 9, pv);
     if (selrow && volAdjust) u8g2.drawFrame(cL() + 1, y + 1, (cR() - cL()) - 2, 10);  // editing
+    u8g2.setDrawColor(1);
+  }
+  drawNavLegend(LIST_HINTS);
+  u8g2.sendBuffer();
+}
+
+static void iconClock(int cx, int cy) {              // analog clock face with hands
+  u8g2.drawCircle(cx, cy, 8);
+  u8g2.drawPixel(cx, cy - 6);                        // 12/3/6/9 tick dots
+  u8g2.drawPixel(cx, cy + 6);
+  u8g2.drawPixel(cx - 6, cy);
+  u8g2.drawPixel(cx + 6, cy);
+  u8g2.drawLine(cx, cy, cx, cy - 4);                 // hour hand (up)
+  u8g2.drawLine(cx, cy, cx + 4, cy + 1);             // minute hand
+  u8g2.drawDisc(cx, cy, 1);                          // hub
+}
+
+static const char *CLOCK_WD[7]  = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+static const char *CLOCK_MO[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+// A De Bethune-style "lance" hand: a shaft from the hub to a hollow lozenge (an
+// outlined diamond) near the end, finishing in a pointed tip. `len` is the tip
+// distance from the hub; `w` is the lozenge half-width. Drawn as outlines so the
+// hollow diamond reads as the watch's signature hand shape.
+static void drawLanceHand(int cx, int cy, float ang, float len, float w) {
+  float s = sinf(ang), c = cosf(ang);
+  auto P = [&](float along, float perp, int &X, int &Y) {       // point in hand-local coords
+    X = cx + (int)lroundf(along * s + perp * c);
+    Y = cy + (int)lroundf(-along * c + perp * s);
+  };
+  int hx, hy, nx, ny, rx, ry, fx, fy, lx, ly, tx, ty;
+  P(0,          0,  hx, hy);   // hub
+  P(len * 0.40f, 0, nx, ny);   // lozenge near point
+  P(len * 0.60f, w, rx, ry);   // lozenge right
+  P(len * 0.80f, 0, fx, fy);   // lozenge far point
+  P(len * 0.60f, -w, lx, ly);  // lozenge left
+  P(len,        0,  tx, ty);   // tip
+  u8g2.drawLine(hx, hy, nx, ny);   // shaft
+  u8g2.drawLine(nx, ny, rx, ry);   // hollow lozenge
+  u8g2.drawLine(rx, ry, fx, fy);
+  u8g2.drawLine(fx, fy, lx, ly);
+  u8g2.drawLine(lx, ly, nx, ny);
+  u8g2.drawLine(fx, fy, tx, ty);   // pointed tip
+}
+
+// Analog dial: 12 ticks (or 12/3/6/9 numerals), hour/minute hands, and — when
+// CLK_SECONDS is set — a longer seconds hand. Centered on (cx,cy) with radius r.
+static void drawClockAnalog(int cx, int cy, int r, uint8_t hh, uint8_t mm, uint8_t ss) {
+  bool numerals = settings.clockFlags & CLK_NUMERALS;
+  u8g2.drawCircle(cx, cy, r);
+  // Rim: all-12 numerals (De Bethune style) with a minute pip at each hour, or a
+  // plain tick ring when numerals are off.
+  for (uint8_t i = 0; i < 12; i++) {
+    float a = i * (PI / 6.0f), s = sinf(a), c = cosf(a);
+    if (numerals) {
+      u8g2.drawPixel(cx + (int)((r - 1) * s), cy - (int)((r - 1) * c));   // hour pip on the rim
+      char lbl[3]; snprintf(lbl, sizeof(lbl), "%u", i == 0 ? 12 : i);
+      int nx = cx + (int)((r - 5) * s), ny = cy - (int)((r - 5) * c);
+      u8g2.setFont(u8g2_font_4x6_tr);
+      u8g2.drawStr(nx - u8g2.getStrWidth(lbl) / 2, ny + 2, lbl);
+    } else {                                           // tick, longer at the quarters
+      int outer = r - 1, inner = (i % 3 == 0) ? r - 4 : r - 2;
+      u8g2.drawLine(cx + (int)(inner * s), cy - (int)(inner * c),
+                    cx + (int)(outer * s), cy - (int)(outer * c));
+    }
+  }
+  // Signature hollow lance hands: short hour, long minute. A thin sweeping second
+  // hand (with a small counter-tail) only when CLK_SECONDS is on.
+  float ha = ((hh % 12) + mm / 60.0f) * (PI / 6.0f);   // 30deg per hour
+  float ma = (mm + ss / 60.0f) * (PI / 30.0f);         // 6deg per minute
+  drawLanceHand(cx, cy, ha, r * 0.52f, 2.6f);          // hour
+  drawLanceHand(cx, cy, ma, r * 0.86f, 3.0f);          // minute
+  if (settings.clockFlags & CLK_SECONDS) {
+    float sa = ss * (PI / 30.0f), s = sinf(sa), c = cosf(sa);   // 6deg per second
+    u8g2.drawLine(cx - (int)(r * 0.20f * s), cy + (int)(r * 0.20f * c),   // tail
+                  cx + (int)(r * 0.92f * s), cy - (int)(r * 0.92f * c));  // tip
+  }
+  u8g2.drawDisc(cx, cy, 2);                            // polished hub over the hand bases
+}
+
+// Digital readout: big HH:MM, with an optional seconds/AM-PM line under it.
+static void drawClockDigital(int cx, int baseY, uint8_t hh, uint8_t mm, uint8_t ss) {
+  bool h24 = settings.clockFlags & CLK_24H;
+  uint8_t dh = hh; const char *ap = nullptr;
+  if (!h24) { ap = (hh < 12) ? "AM" : "PM"; dh = hh % 12; if (dh == 0) dh = 12; }
+  char big[8];
+  if (h24) snprintf(big, sizeof(big), "%02u:%02u", hh, mm);
+  else     snprintf(big, sizeof(big), "%u:%02u", dh, mm);
+  u8g2.setFont(u8g2_font_10x20_tr);
+  u8g2.drawStr(cx - u8g2.getStrWidth(big) / 2, baseY, big);
+
+  char sub[12] = {0};
+  if (settings.clockFlags & CLK_SECONDS) snprintf(sub, sizeof(sub), ":%02u", ss);
+  if (ap) { size_t l = strlen(sub); snprintf(sub + l, sizeof(sub) - l, "%s%s", l ? " " : "", ap); }
+  if (sub[0]) {
+    u8g2.setFont(u8g2_font_6x12_tr);
+    u8g2.drawStr(cx - u8g2.getStrWidth(sub) / 2, baseY + 14, sub);
+  }
+}
+
+// Clock app: analog dial or digital readout (Style), driven by the synced clock
+// (clockGet). Full-screen (no header) so the face gets the whole panel height; the
+// nav legend still shows ► = settings, ◄ = back. Optional date on the bottom line.
+static void drawClock() {
+  u8g2.clearBuffer();
+  NavHint h[4] = {{H_NONE, ""}, {H_NONE, ""}, {H_TEXT, "St"}, {H_LEFT, ""}};   // ► = settings
+  uint8_t hh, mm, ss;
+  if (!clockGet(hh, mm, ss)) {
+    u8g2.setFont(u8g2_font_6x12_tr);
+    u8g2.drawStr(cL() + 2, 36, "Waiting for sync");
+    drawNavLegend(h);
+    u8g2.sendBuffer();
+    return;
+  }
+  bool showDate = settings.clockFlags & CLK_DATE;
+  int cx = (cL() + cR()) / 2;
+  if (settings.clockFlags & CLK_DIGITAL) drawClockDigital(cx, showDate ? 34 : 40, hh, mm, ss);
+  else                                   drawClockAnalog(cx, showDate ? 28 : 32, showDate ? 26 : 30, hh, mm, ss);
+
+  uint16_t yr; uint8_t mo, md, wd;
+  if (showDate && clockGetDate(yr, mo, md, wd)) {
+    char d[20];
+    snprintf(d, sizeof(d), "%s %u %s", CLOCK_WD[wd % 7], md, CLOCK_MO[(mo - 1) % 12]);
+    u8g2.setFont(u8g2_font_5x7_tr);
+    u8g2.drawStr(cx - u8g2.getStrWidth(d) / 2, 63, d);
+  }
+  drawNavLegend(h);
+  u8g2.sendBuffer();
+}
+
+// Per-clock settings list: toggle each option with Select, Back returns to the clock.
+static void drawClockCfg() {
+  drawListHeader("CLOCK");
+  const uint8_t visible = 4;
+  uint8_t start = (sel >= visible) ? (sel - visible + 1) : 0;
+  for (uint8_t row = 0; row < visible && (start + row) < CLOCKCFG_COUNT; row++) {
+    uint8_t idx = start + row;
+    uint8_t y = 16 + row * 12;
+    if (idx == sel) { u8g2.drawBox(cL(), y, 110, 12); u8g2.setDrawColor(0); }
+    u8g2.drawStr(cL() + 3, y + 10, CLOCKCFG_ITEMS[idx]);
+    char val[10] = {0};
+    switch (idx) {
+      case 0: snprintf(val, sizeof(val), (settings.clockFlags & CLK_DIGITAL)  ? "Digital" : "Analog"); break;
+      case 1: snprintf(val, sizeof(val), (settings.clockFlags & CLK_SECONDS)  ? "On"  : "Off"); break;
+      case 2: snprintf(val, sizeof(val), (settings.clockFlags & CLK_NUMERALS) ? "On"  : "Off"); break;
+      case 3: snprintf(val, sizeof(val), (settings.clockFlags & CLK_DATE)     ? "On"  : "Off"); break;
+      case 4: snprintf(val, sizeof(val), (settings.clockFlags & CLK_24H)      ? "24h" : "12h"); break;
+    }
+    if (val[0]) u8g2.drawStr(cR() - 4 - u8g2.getStrWidth(val), y + 10, val);
     u8g2.setDrawColor(1);
   }
   drawNavLegend(LIST_HINTS);
@@ -1962,6 +2135,8 @@ static void render() {
     case PAGE_VOLUME:        drawVolume();                                               break;
     case PAGE_KEYMAP:        drawKeymap();                                               break;
     case PAGE_KEYMAP_SET:    drawKeymapSet();                                            break;
+    case PAGE_CLOCK:         drawClock();                                                break;
+    case PAGE_CLOCKCFG:      drawClockCfg();                                             break;
   }
 }
 
@@ -2221,7 +2396,8 @@ static void displayService() {
   uint32_t now = millis();
   if (orientDirty) { orientDirty = false; applyOrientation(); displayDirty = true; }
 
-  bool keepAwake = (page == PAGE_TIMER && swIsRunning()) ||
+  bool keepAwake = (page == PAGE_CLOCK) ||
+                   (page == PAGE_TIMER && swIsRunning()) ||
                    (page == PAGE_CDTIMER && (cdIsRunning() || cdIsExpired())) ||
                    (page == PAGE_DASH && pcStatsFresh(now)) ||
                    (page == PAGE_MUSIC && musicFresh(now)) ||

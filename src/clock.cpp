@@ -58,3 +58,16 @@ bool clockGet(uint8_t &h, uint8_t &m, uint8_t &s) {
   s = (uint8_t)t.tm_sec;
   return true;
 }
+
+bool clockGetDate(uint16_t &year, uint8_t &mon, uint8_t &mday, uint8_t &wday) {
+  if (!tzKnown) return false;
+  time_t utc = time(nullptr);
+  if (utc < SYNCED_EPOCH) return false;
+  time_t local = utc + tzOffsetSec;
+  struct tm t; gmtime_r(&local, &t);
+  year = (uint16_t)(t.tm_year + 1900);
+  mon  = (uint8_t)(t.tm_mon + 1);
+  mday = (uint8_t)t.tm_mday;
+  wday = (uint8_t)t.tm_wday;
+  return true;
+}

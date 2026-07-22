@@ -44,6 +44,7 @@ void loadSettings() {
   settings.brightFull  = p.getUChar("brfull", 100);
   settings.brightIdle  = p.getUChar("bridle", 20);
   settings.dimIdleSec  = p.getUShort("dimidle", 15);
+  settings.clockFlags  = p.getUChar("clkflags", CLK_NUMERALS | CLK_SECONDS | CLK_DATE | CLK_24H);
   p.end();
 }
 
@@ -68,6 +69,7 @@ void saveSettings() {
   p.putUChar("brfull", settings.brightFull);
   p.putUChar("bridle", settings.brightIdle);
   p.putUShort("dimidle", settings.dimIdleSec);
+  p.putUChar("clkflags", settings.clockFlags);
   p.end();
 }
 

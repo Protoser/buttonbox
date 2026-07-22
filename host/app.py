@@ -41,9 +41,9 @@ IDLEBR_OPTS  = [(0, "Off"), (10, "10%"), (20, "20%"), (40, "40%")]     # dimmed 
 DIM_OPTS     = [(0, "Off"), (10, "10 s"), (30, "30 s"), (60, "60 s")]  # auto-dim delay
 BOOT_OPTS  = [(0, "Apps launcher"), (1, "Buttons"), (2, "Stopwatch"), (3, "PC"), (4, "Shelly"),
               (5, "Music"), (6, "Menu"), (7, "WLED"), (8, "BeamNG"), (9, "Flight"), (10, "MCDU"),
-              (11, "Timer")]
+              (11, "Timer"), (12, "Volume"), (13, "Clock")]
 APP_NAMES  = ["Buttons", "Stopwatch", "PC", "Shelly", "Music", "Menu", "WLED", "BeamNG", "Flight",
-              "MCDU", "Timer"]  # mirror ui.cpp APPS index order
+              "MCDU", "Timer", "Volume", "Clock"]  # mirror ui.cpp APPS index order
 MENU_APP   = APP_NAMES.index("Menu")   # never hideable
 PCSTAT_BITS = [("CPU", 0), ("RAM", 1), ("GPU", 2), ("CPU Temp", 3), ("GPU Temp", 4),
                ("VRAM", 5), ("CPU Power", 6), ("GPU Power", 7)]
