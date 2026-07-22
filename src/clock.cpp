@@ -59,6 +59,14 @@ bool clockGet(uint8_t &h, uint8_t &m, uint8_t &s) {
   return true;
 }
 
+// Sub-second fraction [0,1) of the current second, for a smoothly sweeping hand. Reads
+// the same system clock as clockGet(), just at microsecond resolution.
+float clockGetFrac() {
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+  return tv.tv_usec / 1000000.0f;
+}
+
 bool clockGetDate(uint16_t &year, uint8_t &mon, uint8_t &mday, uint8_t &wday) {
   if (!tzKnown) return false;
   time_t utc = time(nullptr);

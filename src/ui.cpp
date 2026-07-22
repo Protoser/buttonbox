@@ -60,8 +60,39 @@ static inline bool brightOvlActive(uint32_t now) { return (int32_t)(brightOvlUnt
 static bool volAdjust = false;
 static const uint8_t VOL_STEP = 5;
 
-static const char *MENU_ITEMS[]     = {"Button Test", "Chords", "Settings", "App Order", "MCDU Keys", "Key Binds", "Flash Mode", "Back"};
-static const uint8_t MENU_COUNT     = 8;
+static const char *MENU_ITEMS[]     = {"Button Test", "Chords", "Settings", "App Order", "MCDU Keys", "Key Binds", "Flash Mode", "Debug", "Back"};
+static const uint8_t MENU_COUNT     = 9;
+// DEBUG page: pick a dither METHOD and a DUTY (gray level) independently, to compare
+// ways of faking gray on the 1-bit panel at any brightness. Report the method + duty
+// that looks cleanest and it gets noted.
+//   temp = whole screen blinks, on for `duty` frames out of 10 (pure temporal FRC)
+//   bayr = static 4x4 ordered (Bayer) spatial dither
+//   bayT = Bayer dither animated each frame (spatial + temporal averaging)
+//   rand = per-pixel random each frame, on with probability = duty (white-noise FRC)
+//   flip = phase-inverting checkerboard (50% base that never fully blanks). Duty rides
+//          on top: above 50% splices in fully-lit frames, below 50% fully-dark frames,
+//          so it spans 0..100% with a checkerboard core.
+static const char *DBG_PAT_NAMES[] = {"temp", "bayr", "bayT", "rand", "flip"};
+static const uint8_t DBG_PAT_N = sizeof(DBG_PAT_NAMES) / sizeof(DBG_PAT_NAMES[0]);
+static uint8_t dbgPat  = 0;     // dither method
+static uint8_t dbgDuty = 5;     // gray level in tenths: 0..10 -> 0%..100%
+
+// 4x4 Bayer ordered-dither threshold matrix (values 0..15).
+static const uint8_t DBG_BAYER[4][4] = {
+  { 0,  8,  2, 10},
+  {12,  4, 14,  6},
+  { 3, 11,  1,  9},
+  {15,  7, 13,  5}};
+// DEBUG page: SPI-clock sweep. The experimental clock is applied only for the DEBUG
+// flush (restored to a safe clock after), so a too-fast setting garbles just this
+// screen — that corruption is the signal that the ST7920 can't keep up. Stepped in
+// fine 50 kHz increments so you can walk right up to the breaking point.
+static const uint32_t DBG_CLK_STEP = 50000UL;
+static const uint32_t DBG_CLK_MIN  = 50000UL;
+static const uint32_t DBG_CLK_MAX  = 8000000UL;
+static const uint32_t DBG_SAFE_HZ  = 1000000;   // clock used for every non-DEBUG page
+static uint32_t dbgClkHz = 1000000;   // start at 1 MHz
+static uint8_t  dbgFocus = 0;   // which field Up/Down edits: 0 = SPI clock, 1 = pattern, 2 = duty
 static const char *SETTINGS_ITEMS[] = {"Rotate", "Labels", "Idle blank", "Brightness", "Idle bright",
                                        "Auto-dim", "Chord", "Boot", "WiFi", "Back"};
 static const uint8_t SETTINGS_COUNT = 10;
@@ -304,8 +335,24 @@ static void handleNav(uint8_t a) {
         case 4: gotoPage(PAGE_MCDUMAP);  return;
         case 5: gotoPage(PAGE_KEYMAP);   return;
         case 6: enterBootloader();       return;
-        case 7: gotoPage(PAGE_LAUNCHER); return;
+        case 7: gotoPage(PAGE_DEBUG);    return;
+        case 8: gotoPage(PAGE_LAUNCHER); return;
       }
+      break;
+
+    case PAGE_DEBUG:
+      if      (a == NAV_SELECT) { dbgFocus = (dbgFocus + 1) % 3; }  // cycle clk -> pat -> dty
+      else if (a == NAV_UP) {
+        if      (dbgFocus == 0) { if (dbgClkHz + DBG_CLK_STEP <= DBG_CLK_MAX) dbgClkHz += DBG_CLK_STEP; }
+        else if (dbgFocus == 1) { if (dbgPat < DBG_PAT_N - 1) dbgPat++; }
+        else                    { if (dbgDuty < 10) dbgDuty++; }
+      }
+      else if (a == NAV_DOWN) {
+        if      (dbgFocus == 0) { if (dbgClkHz >= DBG_CLK_MIN + DBG_CLK_STEP) dbgClkHz -= DBG_CLK_STEP; }
+        else if (dbgFocus == 1) { if (dbgPat > 0) dbgPat--; }
+        else                    { if (dbgDuty > 0) dbgDuty--; }
+      }
+      else if (a == NAV_BACK) { displaySetSpiClock(DBG_SAFE_HZ); gotoPage(PAGE_MENU); return; }
       break;
 
     case PAGE_SETTINGS:
@@ -1028,10 +1075,70 @@ static void drawLanceHand(int cx, int cy, float ang, float len, float w) {
   u8g2.drawLine(fx, fy, tx, ty);   // pointed tip
 }
 
+// ---- Dithered "gray" pipeline -------------------------------------------------
+// Fake gray on the 1-bit panel. Modes were tuned on the DEBUG page and reused here so
+// any app can paint a shade. Temporal modes (FLIP/RAND) need the page to free-run —
+// the render task advances uiFrame every flush (see render()/displayService). duty10
+// is the gray level in tenths (0..10 -> 0..100%). grayOn() answers "is this pixel lit
+// this frame?"; callers plot with u8g2.drawPixel where it returns true.
+enum GrayMode : uint8_t { GRAY_FLIP = 0, GRAY_RAND, GRAY_BAYER, GRAY_BAYERT };
+static uint32_t uiFrame = 0;    // frames rendered; drives the temporal dither phase
+static bool     uiDither = false;   // set when a temporal gray was drawn this frame -> free-run
+
+static inline bool grayOn(int x, int y, uint8_t duty10, GrayMode mode) {
+  switch (mode) {
+    case GRAY_RAND: {           // per-pixel white noise, on with probability duty/10
+      uiDither = true;
+      uint32_t h = (uint32_t)x * 73856093u ^ (uint32_t)y * 19349663u ^ uiFrame * 83492791u;
+      h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+      return (h % 10u) < duty10;
+    }
+    case GRAY_FLIP: {           // phase-flip checkerboard (50%) + spliced full frames
+      uiDither = true;
+      int extra = (int)duty10 - 5;
+      uint32_t e = extra >= 0 ? (uint32_t)extra : (uint32_t)(-extra);
+      if (e > 0 && ((uiFrame * e) % 5u) < e) return extra > 0;   // full-lit / full-dark frame
+      return (((x + y) & 1) ^ (int)(uiFrame & 1)) != 0;          // checkerboard core
+    }
+    case GRAY_BAYERT:           // 4x4 ordered dither, animated each frame
+      uiDither = true;
+      return DBG_BAYER[(y + uiFrame) & 3][(x + uiFrame) & 3] < (duty10 * 16u + 5u) / 10u;
+    default:                    // GRAY_BAYER: static 4x4 ordered dither (no free-run needed)
+      return DBG_BAYER[y & 3][x & 3] < (duty10 * 16u + 5u) / 10u;
+  }
+}
+
+// Fill a rectangle with a dithered gray (e.g. a disabled-row background).
+static void grayFillRect(int x, int y, int w, int h, uint8_t duty10, GrayMode mode) {
+  for (int py = y; py < y + h; py++)
+    for (int px = x; px < x + w; px++)
+      if (grayOn(px, py, duty10, mode)) u8g2.drawPixel(px, py);
+}
+
+// Bresenham line that plots each pixel only where the gray pattern says "on".
+static void grayLine(int x0, int y0, int x1, int y1, uint8_t duty10, GrayMode mode) {
+  int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+  int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+  int err = dx + dy;
+  for (;;) {
+    if (grayOn(x0, y0, duty10, mode)) u8g2.drawPixel(x0, y0);
+    if (x0 == x1 && y0 == y1) break;
+    int e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x0 += sx; }
+    if (e2 <= dx) { err += dx; y0 += sy; }
+  }
+}
+
 // Analog dial: 12 ticks (or 12/3/6/9 numerals), hour/minute hands, and — when
 // CLK_SECONDS is set — a longer seconds hand. Centered on (cx,cy) with radius r.
 static void drawClockAnalog(int cx, int cy, int r, uint8_t hh, uint8_t mm, uint8_t ss) {
   bool numerals = settings.clockFlags & CLK_NUMERALS;
+  // Textured background: sparse 20% random noise, confined to the dial disc.
+  for (int y = cy - r; y <= cy + r; y++)
+    for (int x = cx - r; x <= cx + r; x++) {
+      int ddx = x - cx, ddy = y - cy;
+      if (ddx * ddx + ddy * ddy <= r * r && grayOn(x, y, 2, GRAY_RAND)) u8g2.drawPixel(x, y);
+    }
   u8g2.drawCircle(cx, cy, r);
   // Rim: all-12 numerals (De Bethune style) with a minute pip at each hour, or a
   // plain tick ring when numerals are off.
@@ -1051,12 +1158,14 @@ static void drawClockAnalog(int cx, int cy, int r, uint8_t hh, uint8_t mm, uint8
   }
   // Signature hollow lance hands: short hour, long minute. A thin sweeping second
   // hand (with a small counter-tail) only when CLK_SECONDS is on.
+  float frac = clockGetFrac();                         // sub-second, for a smooth sweep
   float ha = ((hh % 12) + mm / 60.0f) * (PI / 6.0f);   // 30deg per hour
-  float ma = (mm + ss / 60.0f) * (PI / 30.0f);         // 6deg per minute
+  float ma = (mm + (ss + frac) / 60.0f) * (PI / 30.0f); // 6deg per minute (creeps smoothly)
   drawLanceHand(cx, cy, ha, r * 0.52f, 2.6f);          // hour
   drawLanceHand(cx, cy, ma, r * 0.86f, 3.0f);          // minute
   if (settings.clockFlags & CLK_SECONDS) {
-    float sa = ss * (PI / 30.0f), s = sinf(sa), c = cosf(sa);   // 6deg per second
+    float sang = (ss + frac) * (PI / 30.0f);           // smooth second angle, 6deg/sec
+    float s = sinf(sang), c = cosf(sang);
     u8g2.drawLine(cx - (int)(r * 0.20f * s), cy + (int)(r * 0.20f * c),   // tail
                   cx + (int)(r * 0.92f * s), cy - (int)(r * 0.92f * c));  // tip
   }
@@ -1245,6 +1354,8 @@ static void drawAppOrder() {
     if (idx == sel) {
       if (appGrab) u8g2.drawFrame(cL(), y, 110, 12);            // picked up: outline, text stays normal
       else { u8g2.drawBox(cL(), y, 110, 12); u8g2.setDrawColor(0); }
+    } else if (hidden) {
+      grayFillRect(cL(), y, 110, 12, 5, GRAY_FLIP);             // disabled row: 50% gray background
     }
     u8g2.drawStr(cL() + 3, y + 10, a < APP_COUNT ? APPS[a].name : "---");
     if (hidden) { const char *o = "off"; u8g2.drawStr(cL() + 110 - 4 - u8g2.getStrWidth(o), y + 10, o); }
@@ -1845,6 +1956,13 @@ static void drawFlightCore() {                          // PFD: tapes + attitude
   const float ppd = 0.9f;                                // pixels per degree of pitch
   float br = flight.bank * DEG_TO_RAD, c = cosf(br), s = sinf(br);
   float hyc = adiCy + flight.pitch * ppd;                // horizon centre (the 0deg line)
+  // Ground fill: shade everything below the (bank-rotated) horizon with 50% flip gray,
+  // so attitude reads at a glance instead of from a bare line. Down-axis is (s,c); a
+  // pixel is ground when its projection onto it is positive. Clipped to the ADI box.
+  for (int py = yT; py <= yB; py++)
+    for (int px = adiL; px <= adiR; px++)
+      if ((px - adiCx) * s + (py - hyc) * c > 0.0f && grayOn(px, py, 5, GRAY_FLIP))
+        u8g2.drawPixel(px, py);
   static const int LADDER[] = {-20, -10, 0, 10, 20};
   u8g2.setFont(u8g2_font_4x6_tr);
   for (uint8_t i = 0; i < 5; i++) {
@@ -2102,7 +2220,59 @@ static void drawBrightnessOverlay() {
   if (fill > 0) u8g2.drawBox(bx + 1, by + 1, fill, bh - 2);
 }
 
+// DEBUG scratch page. First test: temporal dithering (frame-rate control) on the
+// 1-bit ST7920. Draws `dbgSteps` bars, each held on for a duty of i/(dbgSteps-1) of
+// the frames. Bar 0 = always off (black), the last = always on (white); the middle
+// bars flip on/off every frame and rely on the slow STN pixel + eye to average into
+// distinct grays. The render task free-runs this page (no heartbeat throttle) so the
+// flip rate is as fast as sendBuffer() allows — that's the ceiling on how many clean
+// levels you can actually resolve. Up/Down changes the number of levels.
+static void drawDebug() {
+  static uint32_t fpsWinStart = 0, fpsCount = 0, fpsShown = 0;
+
+  // Measure the achieved flush rate over ~500 ms windows.
+  uint32_t now = millis();
+  if (fpsWinStart == 0) fpsWinStart = now;
+  fpsCount++;
+  if (now - fpsWinStart >= 500) {
+    fpsShown = fpsCount * 1000 / (now - fpsWinStart);
+    fpsWinStart = now; fpsCount = 0;
+  }
+
+  // Apply the experimental clock for THIS flush only; restored to safe at the end.
+  displaySetSpiClock(dbgClkHz);
+
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_5x7_tr);
+  char t[32];
+  float mhz = dbgClkHz / 1000000.0f;
+  snprintf(t, sizeof(t), "%c%.2fM %c%s %c%u%% f%lu",
+           dbgFocus == 0 ? '>' : ' ', mhz,
+           dbgFocus == 1 ? '>' : ' ', DBG_PAT_NAMES[dbgPat],
+           dbgFocus == 2 ? '>' : ' ', dbgDuty * 10u,
+           (unsigned long)fpsShown);
+  u8g2.drawStr(0, 7, t);
+  u8g2.drawHLine(0, 10, 128);
+
+  // Fill everything below the header with the selected method at the chosen duty via
+  // the shared grayOn() pipeline, so DEBUG and the apps render identical dither.
+  const int y0 = 13, y1 = 63, hh = y1 - y0 + 1;
+  if (dbgPat == 0) {   // temp: whole screen on for `duty` frames of every 10 (spread)
+    if (((uiFrame * dbgDuty) % 10) < dbgDuty) u8g2.drawBox(0, y0, 128, hh);
+  } else {
+    GrayMode m = dbgPat == 1 ? GRAY_BAYER : dbgPat == 2 ? GRAY_BAYERT
+               : dbgPat == 3 ? GRAY_RAND  : GRAY_FLIP;
+    for (int y = y0; y <= y1; y++) for (int x = 0; x < 128; x++)
+      if (grayOn(x, y, dbgDuty, m)) u8g2.drawPixel(x, y);
+  }
+  u8g2.sendBuffer();                   // flushes at the experimental clock
+
+  displaySetSpiClock(DBG_SAFE_HZ);     // restore safe clock for every other page
+}
+
 static void render() {
+  uiFrame++;                 // advance the temporal-dither phase once per flush
+  uiDither = false;          // draw fns set this if they paint temporal gray (-> free-run)
   // While the brightness overlay is up, don't redraw the page: draw the bar over the
   // retained framebuffer and flush once. Redrawing the page would flush it (overlay
   // gone) and then flush the overlay, making the bar blink off every heartbeat.
@@ -2137,6 +2307,7 @@ static void render() {
     case PAGE_KEYMAP_SET:    drawKeymapSet();                                            break;
     case PAGE_CLOCK:         drawClock();                                                break;
     case PAGE_CLOCKCFG:      drawClockCfg();                                             break;
+    case PAGE_DEBUG:         drawDebug();                                                break;
   }
 }
 
@@ -2396,7 +2567,8 @@ static void displayService() {
   uint32_t now = millis();
   if (orientDirty) { orientDirty = false; applyOrientation(); displayDirty = true; }
 
-  bool keepAwake = (page == PAGE_CLOCK) ||
+  bool keepAwake = (page == PAGE_DEBUG) ||
+                   (page == PAGE_CLOCK) ||
                    (page == PAGE_TIMER && swIsRunning()) ||
                    (page == PAGE_CDTIMER && (cdIsRunning() || cdIsExpired())) ||
                    (page == PAGE_DASH && pcStatsFresh(now)) ||
@@ -2426,7 +2598,12 @@ static void displayService() {
   uint32_t heartbeat = keepAwake ? 100 : 200;
   bool dirty = displayDirty;
   displayDirty = false;            // clear before drawing so a change mid-render re-marks it
-  if (!blanked && (dirty || (now - lastDraw) > heartbeat)) {
+  // Free-run (redraw every task tick, no heartbeat throttle) whenever temporal dither
+  // is on screen: flip/rand gray only looks solid at the free-run frame rate; at the
+  // heartbeat it would flicker. uiDither is set by grayOn() during the last render, so
+  // any page that paints temporal gray (clock, PFD, disabled rows) opts in automatically.
+  bool freeRun = (page == PAGE_DEBUG) || uiDither;
+  if (!blanked && (freeRun || dirty || (now - lastDraw) > heartbeat)) {
     render(); lastDraw = now;
   }
 }

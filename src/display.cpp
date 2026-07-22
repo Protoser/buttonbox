@@ -1,13 +1,24 @@
 #include "display.h"
 #include "config.h"
 #include <math.h>
+#include <SPI.h>                 // pre-init the SPI bus with MISO=-1 (see displayBegin)
 #include "driver/gpio.h"        // gpio_hold_en/dis: latch the backlight pin through a reboot
 #include "soc/soc.h"            // REG_CLR_BIT
 #include "soc/rtc_cntl_reg.h"   // RTC_CNTL_DIG_ISO_REG / DG_PAD_FORCE_UNHOLD
 
-// ST7920 in software SPI: clock=E, data=R/W, cs=RS. Rotation is applied from
-// saved settings via ui's applyOrientation(); the constructor value is a default.
-U8G2_ST7920_128X64_F_SW_SPI u8g2(U8G2_R2, LCD_CLOCK_PIN, LCD_DATA_PIN, LCD_CS_PIN, U8X8_PIN_NONE);
+// ST7920 in hardware SPI: E=SCK (clock), R/W=MOSI (data), RS=CS. The HW-SPI class
+// only takes cs/reset; the bus is pinned to our SCK/MOSI in displayBegin(). HW SPI
+// replaced the original bit-banged SW SPI to raise the flush rate (needed for
+// temporal-dither / FRC). Rotation is applied via ui's applyOrientation().
+U8G2_ST7920_128X64_F_HW_SPI u8g2(U8G2_R2, LCD_CS_PIN, U8X8_PIN_NONE);
+
+// Default SPI bus clock. ST7920 is nominally rated ~2.5 MHz but usually tolerates
+// more; the DEBUG page lets you push past this live to find the real ceiling.
+static const uint32_t LCD_SPI_HZ_DEFAULT = 1000000;
+static uint32_t g_spiHz = LCD_SPI_HZ_DEFAULT;
+
+void displaySetSpiClock(uint32_t hz) { g_spiHz = hz; u8g2.setBusClock(hz); }
+uint32_t displayGetSpiClock() { return g_spiHz; }
 
 // Backlight PWM (Arduino-ESP32 2.x LEDC API). 20 kHz is above hearing and any
 // visible flicker; 8-bit duty gives 256 brightness steps.
@@ -45,7 +56,15 @@ void displayBacklightHoldFull() {
 
 void displayBegin() {
   gpio_hold_dis((gpio_num_t)LCD_BACKLIGHT_PIN);   // release a Flash-Mode hold from last boot
+  // Claim the SPI bus ourselves FIRST, with MISO = -1. The write-only ST7920 never
+  // uses MISO, but U8g2's ESP32 HW-SPI init would otherwise call SPI.begin(clk,MISO,
+  // mosi) with the board-default MISO (GPIO 13) — which is a HID button, and grabbing
+  // it clears the button's pull-up and spews phantom key presses. SPIClass::begin()
+  // no-ops once the bus is up ("if(_spi) return;"), so this pre-begin wins and U8g2's
+  // later begin() leaves GPIO 13 alone.
+  SPI.begin(LCD_CLOCK_PIN, -1, LCD_DATA_PIN, -1);
   u8g2.begin();
+  displaySetSpiClock(LCD_SPI_HZ_DEFAULT);   // begin() inits at the driver default; pin us to a known clock
   ledcSetup(BL_CHANNEL, BL_FREQ_HZ, BL_RES_BITS);
   ledcAttachPin(LCD_BACKLIGHT_PIN, BL_CHANNEL);
   displaySetBacklight(100);   // full on until displayService applies the saved level

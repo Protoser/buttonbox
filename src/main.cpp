@@ -30,13 +30,17 @@ void setup() {
   // Clear the force-download flag so a normal reset never re-enters flash mode.
   REG_CLR_BIT(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
 
-  buttonsBegin();
   loadSettings();
   chordsLoad();
   shellyBegin();
   wledBegin();
   clockBegin();
   uiBegin();
+  // buttonsBegin() runs AFTER uiBegin() on purpose: displayBegin() brings up hardware
+  // SPI, whose ESP32 init grabs the bus's default MISO pad (GPIO 13) — which is HID
+  // button 7. Claiming the button pins last re-owns GPIO 13 as INPUT_PULLUP so it
+  // stops floating and machine-gunning phantom presses. See display.cpp.
+  buttonsBegin();
   hidBegin();
   Serial.begin(115200);
   uiNoteActivity(millis());
